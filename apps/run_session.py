@@ -38,6 +38,7 @@ def run_sonar_worker(
     csv_path: Path,
     logger: logging.Logger,
     stop_event: threading.Event,
+    ready_event: threading.Event,
     startup_error: list[BaseException],
 ) -> None:
     client: PingSonarClient | None = None
@@ -46,6 +47,7 @@ def run_sonar_worker(
         sonar_config = load_sonar_config(sonar_raw)
         client = PingSonarClient(sonar_config, logger=logger)
         client.connect()
+        ready_event.set()
         sample_count = log_sonar_stream(
             client,
             sonar_config,
@@ -145,6 +147,7 @@ def main() -> int:
         video_path = session_paths.video / "camera_record.mp4"
         sonar_csv_path = session_paths.sonar / "sonar_log.csv"
         stop_event = threading.Event()
+        sonar_ready = threading.Event()
         sonar_errors: list[BaseException] = []
 
         metadata = {
@@ -174,17 +177,17 @@ def main() -> int:
         sonar_thread = threading.Thread(
             target=run_sonar_worker,
             name="sonar-worker",
-            args=(sonar_raw, sonar_csv_path, logger, stop_event, sonar_errors),
+            args=(sonar_raw, sonar_csv_path, logger, stop_event, sonar_ready, sonar_errors),
             daemon=True,
         )
         sonar_thread.start()
 
-        # Fail fast if sonar cannot initialize, so the session never records half a run silently.
-        for _ in range(20):
+        # Wait until sonar either becomes ready or finishes all retry attempts.
+        while not sonar_ready.is_set():
             if sonar_errors:
                 raise RuntimeError(f"Sonar initialization failed: {sonar_errors[0]}")
             if not sonar_thread.is_alive():
-                break
+                raise RuntimeError("Sonar worker stopped before initialization completed.")
             time.sleep(0.1)
 
         frame_count, elapsed = run_camera_loop(camera_raw, video_path, logger, stop_event)

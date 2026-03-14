@@ -62,18 +62,44 @@ class PingSonarClient:
                 "brping is not installed. Install it on Jetson or the Ubuntu environment before running sonar logging."
             ) from exc
 
-        self._device = Ping1D()
-        self._device.connect_serial(self.config.port, self.config.baudrate)
-        if not self._device.initialize():
-            raise RuntimeError(
-                f"Could not initialize Ping Sonar device on {self.config.port} at {self.config.baudrate} baud."
-            )
+        last_error: Exception | None = None
 
-        self.logger.info(
-            "Connected to Ping Sonar. port=%s baudrate=%s",
-            self.config.port,
-            self.config.baudrate,
-        )
+        for attempt in range(1, 6):
+            try:
+                self.logger.info(
+                    "Connecting to Ping Sonar (attempt %d/5). port=%s baudrate=%s",
+                    attempt,
+                    self.config.port,
+                    self.config.baudrate,
+                )
+
+                self._device = Ping1D()
+                self._device.connect_serial(self.config.port, self.config.baudrate)
+                if not self._device.initialize():
+                    raise RuntimeError(
+                        f"Could not initialize Ping Sonar device on {self.config.port} at {self.config.baudrate} baud."
+                    )
+
+                self.logger.info(
+                    "Connected to Ping Sonar. port=%s baudrate=%s",
+                    self.config.port,
+                    self.config.baudrate,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                self._device = None
+                self.logger.warning(
+                    "Ping Sonar initialization attempt %d/5 failed: %s",
+                    attempt,
+                    exc,
+                )
+                if attempt < 5:
+                    time.sleep(1.0)
+
+        raise RuntimeError(
+            f"Could not initialize Ping Sonar device on {self.config.port} after 5 attempts."
+        ) from last_error
 
     def read_record(self) -> SonarRecord:
         if self._device is None:
