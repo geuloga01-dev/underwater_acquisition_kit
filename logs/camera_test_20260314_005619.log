@@ -1,0 +1,5 @@
+2026-03-14 00:56:19 | INFO | camera_test | Loaded camera config from C:\dev\underwater_acquisition_kit\configs\camera.yaml
+2026-03-14 00:56:19 | INFO | camera_test | Opening camera source=1 backend=dshow
+2026-03-14 00:56:23 | INFO | camera_test | Starting preview. Press 'q' to quit.
+2026-03-14 00:56:55 | INFO | camera_test | Quit requested by user.
+2026-03-14 00:56:55 | INFO | camera_test | Camera resources released.

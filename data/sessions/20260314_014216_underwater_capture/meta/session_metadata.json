@@ -1,0 +1,34 @@
+{
+  "session": {
+    "session_id": "20260314_014216_underwater_capture",
+    "root": "C:\\dev\\underwater_acquisition_kit\\data\\sessions\\20260314_014216_underwater_capture",
+    "video": "C:\\dev\\underwater_acquisition_kit\\data\\sessions\\20260314_014216_underwater_capture\\video",
+    "sonar": "C:\\dev\\underwater_acquisition_kit\\data\\sessions\\20260314_014216_underwater_capture\\sonar",
+    "logs": "C:\\dev\\underwater_acquisition_kit\\data\\sessions\\20260314_014216_underwater_capture\\logs",
+    "meta": "C:\\dev\\underwater_acquisition_kit\\data\\sessions\\20260314_014216_underwater_capture\\meta"
+  },
+  "camera": {
+    "source": 1,
+    "backend": "dshow",
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "preview": true,
+    "autofocus": true,
+    "focus": null,
+    "warmup_frames": 20,
+    "window_name": "Underwater Acquisition Kit - Camera Test"
+  },
+  "sonar": {
+    "port": "/dev/ttyUSB0",
+    "baudrate": 115200,
+    "sample_interval": 0.2,
+    "csv_save": true,
+    "csv_path": null,
+    "telemetry_enabled": false
+  },
+  "notes": {
+    "purpose": "Session scaffold for future camera recording and sonar logging integration.",
+    "why_split": "Camera, sonar, and session helpers stay separate so hardware-specific code can evolve without rewriting the app entry points."
+  }
+}

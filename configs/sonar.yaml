@@ -1,0 +1,10 @@
+sonar:
+  port: "/dev/ttyUSB0"
+  baudrate: 115200
+  sample_interval: 0.2
+  csv_save: true
+  csv_path:
+  telemetry_enabled: false
+
+logging:
+  level: INFO

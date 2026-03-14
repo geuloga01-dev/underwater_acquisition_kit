@@ -1,0 +1,8 @@
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Session created: C:\dev\underwater_acquisition_kit\data\sessions\20260314_014216_underwater_capture
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Camera source prepared: 1
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Sonar port prepared: /dev/ttyUSB0
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Metadata saved: C:\dev\underwater_acquisition_kit\data\sessions\20260314_014216_underwater_capture\meta\session_metadata.json
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Session video dir: C:\dev\underwater_acquisition_kit\data\sessions\20260314_014216_underwater_capture\video
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Session sonar dir: C:\dev\underwater_acquisition_kit\data\sessions\20260314_014216_underwater_capture\sonar
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | Session log dir: C:\dev\underwater_acquisition_kit\data\sessions\20260314_014216_underwater_capture\logs
+2026-03-14 01:42:16 | INFO | run_session_20260314_014216_underwater_capture | This MVP does not start full concurrent capture yet.

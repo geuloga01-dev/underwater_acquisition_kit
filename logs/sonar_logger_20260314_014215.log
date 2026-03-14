@@ -1,0 +1,17 @@
+2026-03-14 01:42:15 | ERROR | sonar_logger | Sonar logging failed: brping is not installed. Install it on Jetson or the Ubuntu environment before running sonar logging.. This is expected on a laptop if the Ping device or required package is not connected.
+Traceback (most recent call last):
+  File "C:\dev\underwater_acquisition_kit\src\sonar\ping_logger.py", line 57, in connect
+    from brping import Ping1D
+ModuleNotFoundError: No module named 'brping'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\dev\underwater_acquisition_kit\apps\sonar_logger.py", line 42, in main
+    client.connect()
+    ~~~~~~~~~~~~~~^^
+  File "C:\dev\underwater_acquisition_kit\src\sonar\ping_logger.py", line 59, in connect
+    raise RuntimeError(
+        "brping is not installed. Install it on Jetson or the Ubuntu environment before running sonar logging."
+    ) from exc
+RuntimeError: brping is not installed. Install it on Jetson or the Ubuntu environment before running sonar logging.
