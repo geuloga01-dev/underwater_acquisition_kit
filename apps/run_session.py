@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 import sys
 
@@ -8,10 +10,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import cv2
 import yaml
 
-from src.camera.webcam import load_camera_config
-from src.sonar.ping_logger import load_sonar_config
+from src.camera.recording import VideoRecorder, load_recording_config
+from src.camera.webcam import WebcamCapture, load_camera_config
+from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream
 from src.utils.logger import get_app_logger
 from src.utils.session import create_session_dirs, save_metadata, session_paths_to_dict
 
@@ -27,6 +31,96 @@ def resolve_log_level(*configs: dict) -> int:
         if level_name:
             return getattr(logging, str(level_name).upper(), logging.INFO)
     return logging.INFO
+
+
+def run_sonar_worker(
+    sonar_raw: dict,
+    csv_path: Path,
+    logger: logging.Logger,
+    stop_event: threading.Event,
+    startup_error: list[BaseException],
+) -> None:
+    client: PingSonarClient | None = None
+
+    try:
+        sonar_config = load_sonar_config(sonar_raw)
+        client = PingSonarClient(sonar_config, logger=logger)
+        client.connect()
+        sample_count = log_sonar_stream(
+            client,
+            sonar_config,
+            logger,
+            csv_path=csv_path,
+            stop_event=stop_event,
+        )
+        logger.info("Sonar worker stopped. samples=%d output=%s", sample_count, csv_path)
+    except Exception as exc:
+        startup_error.append(exc)
+        stop_event.set()
+        logger.exception("Sonar worker failed: %s", exc)
+    finally:
+        if client is not None:
+            client.close()
+
+
+def run_camera_loop(
+    camera_raw: dict,
+    video_path: Path,
+    logger: logging.Logger,
+    stop_event: threading.Event,
+) -> tuple[int, float]:
+    capture: WebcamCapture | None = None
+    recorder: VideoRecorder | None = None
+    frame_count = 0
+    start_time = time.monotonic()
+
+    try:
+        camera_config = load_camera_config(camera_raw)
+        recording_config = load_recording_config(camera_raw)
+        preview_enabled = recording_config.preview or camera_config.preview
+
+        capture = WebcamCapture(camera_config, logger=logger)
+        capture.open()
+
+        recorder = VideoRecorder(
+            output_path=video_path,
+            recording_config=recording_config,
+            frame_size=(camera_config.width or 640, camera_config.height or 480),
+            fps=float(camera_config.fps or 30),
+            logger=logger,
+        )
+
+        logger.info("Camera recording started. output=%s", video_path)
+
+        while not stop_event.is_set():
+            ok, frame = capture.read()
+            if not ok:
+                raise RuntimeError("Failed to read a frame from the camera.")
+
+            recorder.write(frame)
+            frame_count += 1
+
+            if preview_enabled:
+                cv2.imshow(camera_config.window_name, frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    logger.info("Camera preview stop requested by user.")
+                    stop_event.set()
+                    break
+
+            elapsed = time.monotonic() - start_time
+            if recording_config.duration_seconds > 0 and elapsed >= recording_config.duration_seconds:
+                logger.info("Camera recording duration reached: %.2f seconds", elapsed)
+                stop_event.set()
+                break
+
+        elapsed = max(time.monotonic() - start_time, 0.001)
+        return frame_count, elapsed
+    finally:
+        if recorder is not None:
+            recorder.release()
+        if capture is not None:
+            capture.release()
+        cv2.destroyAllWindows()
 
 
 def main() -> int:
@@ -47,13 +141,19 @@ def main() -> int:
 
         camera_config = load_camera_config(camera_raw)
         sonar_config = load_sonar_config(sonar_raw)
+        recording_config = load_recording_config(camera_raw)
+        video_path = session_paths.video / "camera_record.mp4"
+        sonar_csv_path = session_paths.sonar / "sonar_log.csv"
+        stop_event = threading.Event()
+        sonar_errors: list[BaseException] = []
 
         metadata = {
             "session": session_paths_to_dict(session_paths),
             "camera": camera_raw.get("camera", {}),
             "sonar": sonar_raw.get("sonar", {}),
+            "recording": camera_raw.get("recording", {}),
             "notes": {
-                "purpose": "Session scaffold for future camera recording and sonar logging integration.",
+                "purpose": "Concurrent camera and sonar acquisition MVP for Jetson data collection.",
                 "why_split": "Camera, sonar, and session helpers stay separate so hardware-specific code can evolve without rewriting the app entry points.",
             },
         }
@@ -63,10 +163,46 @@ def main() -> int:
         logger.info("Camera source prepared: %s", camera_config.source)
         logger.info("Sonar port prepared: %s", sonar_config.port)
         logger.info("Metadata saved: %s", metadata_path)
-        logger.info("Session video dir: %s", session_paths.video)
-        logger.info("Session sonar dir: %s", session_paths.sonar)
-        logger.info("Session log dir: %s", session_paths.logs)
-        logger.info("This MVP does not start full concurrent capture yet.")
+        logger.info("Session video output: %s", video_path)
+        logger.info("Session sonar output: %s", sonar_csv_path)
+        logger.info(
+            "Session starting. preview=%s duration_seconds=%.1f",
+            recording_config.preview or camera_config.preview,
+            recording_config.duration_seconds,
+        )
+
+        sonar_thread = threading.Thread(
+            target=run_sonar_worker,
+            name="sonar-worker",
+            args=(sonar_raw, sonar_csv_path, logger, stop_event, sonar_errors),
+            daemon=True,
+        )
+        sonar_thread.start()
+
+        # Fail fast if sonar cannot initialize, so the session never records half a run silently.
+        for _ in range(20):
+            if sonar_errors:
+                raise RuntimeError(f"Sonar initialization failed: {sonar_errors[0]}")
+            if not sonar_thread.is_alive():
+                break
+            time.sleep(0.1)
+
+        frame_count, elapsed = run_camera_loop(camera_raw, video_path, logger, stop_event)
+        stop_event.set()
+        sonar_thread.join(timeout=5.0)
+
+        if sonar_errors:
+            raise RuntimeError(f"Sonar logging failed during session: {sonar_errors[0]}")
+
+        logger.info(
+            "Session finished. frames=%d elapsed=%.2fs avg_fps=%.2f",
+            frame_count,
+            elapsed,
+            frame_count / elapsed,
+        )
+        return 0
+    except KeyboardInterrupt:
+        bootstrap_logger.info("Session interrupted by user.")
         return 0
     except Exception as exc:
         bootstrap_logger.exception("Session setup failed: %s", exc)

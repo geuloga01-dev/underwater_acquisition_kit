@@ -140,6 +140,15 @@ data/sessions/<session_id>/
 
 This is intentionally a small scaffold first so later we can plug camera recording, sonar logging, metadata, and real-time processing into one session flow without rewriting the directory structure.
 
+Current behavior:
+
+- creates one `session_id`
+- records camera video to `video/camera_record.mp4`
+- logs sonar samples to `sonar/sonar_log.csv`
+- stores metadata in `meta/session_metadata.json`
+- writes session logs to `logs/run_session.log`
+- stops cleanly on `Ctrl+C`
+
 ## File Roles
 
 - `apps/camera_test.py`: app entry point for preview testing.

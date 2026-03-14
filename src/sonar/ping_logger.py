@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import csv
 import logging
 from pathlib import Path
+import threading
 import time
 from typing import Any
 
@@ -21,7 +22,8 @@ class SonarConfig:
 
 @dataclass(slots=True)
 class SonarRecord:
-    timestamp: str
+    timestamp_iso: str
+    unix_time: float
     distance_mm: int | None
     confidence: int | None
 
@@ -89,8 +91,10 @@ class PingSonarClient:
 
 
 def normalize_record(raw_message: dict[str, Any]) -> SonarRecord:
+    now = datetime.now(timezone.utc)
     return SonarRecord(
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp_iso=now.isoformat(),
+        unix_time=now.timestamp(),
         distance_mm=_as_int(raw_message.get("distance")),
         confidence=_as_int(raw_message.get("confidence")),
     )
@@ -99,7 +103,8 @@ def normalize_record(raw_message: dict[str, Any]) -> SonarRecord:
 def build_telemetry_packet(record: SonarRecord) -> dict[str, Any]:
     # Keep packet generation separate so local logging and future telemetry publish stay decoupled.
     return {
-        "timestamp": record.timestamp,
+        "timestamp_iso": record.timestamp_iso,
+        "unix_time": record.unix_time,
         "distance_mm": record.distance_mm,
         "confidence": record.confidence,
     }
@@ -110,7 +115,10 @@ def append_csv_record(csv_path: Path, record: SonarRecord) -> None:
     write_header = not csv_path.exists()
 
     with csv_path.open("a", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=["timestamp", "distance_mm", "confidence"])
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["timestamp_iso", "unix_time", "distance_mm", "confidence"],
+        )
         if write_header:
             writer.writeheader()
         writer.writerow(asdict(record))
@@ -122,12 +130,16 @@ def log_sonar_stream(
     logger: logging.Logger,
     csv_path: Path | None = None,
     max_samples: int | None = None,
+    stop_event: threading.Event | None = None,
 ) -> int:
     sample_count = 0
     logger.info("Starting sonar logging. Press Ctrl+C to stop.")
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
+
             record = client.read_record()
             logger.info(
                 "Sonar sample distance_mm=%s confidence=%s",
@@ -146,7 +158,10 @@ def log_sonar_stream(
             if max_samples is not None and sample_count >= max_samples:
                 break
 
-            time.sleep(config.sample_interval)
+            if stop_event is None:
+                time.sleep(config.sample_interval)
+            else:
+                stop_event.wait(config.sample_interval)
     except KeyboardInterrupt:
         logger.info("Sonar logging interrupted by user.")
 
