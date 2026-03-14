@@ -5,7 +5,7 @@ camera:
   width: 640
   height: 480
   fps: 30
-  preview: true
+  preview: false
   autofocus: true
   focus:
   warmup_frames: 20

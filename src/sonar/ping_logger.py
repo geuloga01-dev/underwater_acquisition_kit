@@ -73,6 +73,7 @@ class PingSonarClient:
                     self.config.baudrate,
                 )
 
+                self.close()
                 self._device = Ping1D()
                 self._device.connect_serial(self.config.port, self.config.baudrate)
                 if not self._device.initialize():
@@ -88,7 +89,7 @@ class PingSonarClient:
                 return
             except Exception as exc:
                 last_error = exc
-                self._device = None
+                self.close()
                 self.logger.warning(
                     "Ping Sonar initialization attempt %d/5 failed: %s",
                     attempt,
@@ -112,7 +113,18 @@ class PingSonarClient:
         return normalize_record(message)
 
     def close(self) -> None:
-        # brping serial device does not expose a required explicit close path in this MVP.
+        if self._device is None:
+            return
+
+        # Best-effort serial cleanup before retrying or exiting.
+        serial_handle = getattr(self._device, "iodev", None)
+        if serial_handle is not None:
+            close_method = getattr(serial_handle, "close", None)
+            if callable(close_method):
+                try:
+                    close_method()
+                except Exception:
+                    pass
         self._device = None
 
 

@@ -24,7 +24,7 @@ class CameraConfig:
     width: int | None = 640
     height: int | None = 480
     fps: int | None = 30
-    preview: bool = True
+    preview: bool = False
     autofocus: bool | None = True
     focus: int | None = None
     warmup_frames: int = 15
@@ -40,7 +40,7 @@ def load_camera_config(raw_config: dict[str, Any]) -> CameraConfig:
         width=_optional_int(camera_section.get("width")),
         height=_optional_int(camera_section.get("height")),
         fps=_optional_int(camera_section.get("fps")),
-        preview=_optional_bool(camera_section.get("preview"), default=True) or False,
+        preview=_optional_bool(camera_section.get("preview"), default=False) or False,
         autofocus=_optional_bool(camera_section.get("autofocus"), default=True),
         focus=_optional_int(camera_section.get("focus")),
         warmup_frames=int(camera_section.get("warmup_frames", 15)),

@@ -65,6 +65,22 @@ def run_sonar_worker(
             client.close()
 
 
+def perform_sonar_quick_check(sonar_raw: dict, logger: logging.Logger) -> None:
+    logger.info("Initialization order: sonar quick check -> sonar worker -> camera open -> concurrent capture")
+    logger.info("Running sonar-only quick check before camera initialization.")
+
+    sonar_config = load_sonar_config(sonar_raw)
+    client = PingSonarClient(sonar_config, logger=logger)
+    try:
+        client.connect()
+        logger.info("Sonar quick check succeeded.")
+    except Exception as exc:
+        logger.exception("Sonar quick check failed before session start: %s", exc)
+        raise RuntimeError(f"Sonar quick check failed: {exc}") from exc
+    finally:
+        client.close()
+
+
 def run_camera_loop(
     camera_raw: dict,
     video_path: Path,
@@ -82,7 +98,12 @@ def run_camera_loop(
         preview_enabled = recording_config.preview or camera_config.preview
 
         capture = WebcamCapture(camera_config, logger=logger)
-        capture.open()
+        try:
+            logger.info("Opening camera after sonar initialization. source=%s backend=%s", camera_config.source, camera_config.backend)
+            capture.open()
+        except Exception as exc:
+            logger.exception("Camera initialization failed: %s", exc)
+            raise RuntimeError(f"Camera initialization failed: {exc}") from exc
 
         recorder = VideoRecorder(
             output_path=video_path,
@@ -173,6 +194,11 @@ def main() -> int:
             recording_config.preview or camera_config.preview,
             recording_config.duration_seconds,
         )
+        logger.info("Preview is disabled by default unless camera.preview or recording.preview is set true.")
+
+        perform_sonar_quick_check(sonar_raw, logger)
+        logger.info("Waiting 1.0 second after sonar quick check before starting sonar worker.")
+        time.sleep(1.0)
 
         sonar_thread = threading.Thread(
             target=run_sonar_worker,
@@ -182,13 +208,17 @@ def main() -> int:
         )
         sonar_thread.start()
 
-        # Wait until sonar either becomes ready or finishes all retry attempts.
+        logger.info("Waiting for sonar worker initialization to complete before opening camera.")
         while not sonar_ready.is_set():
             if sonar_errors:
+                logger.error("Sonar worker initialization failed: %s", sonar_errors[0])
                 raise RuntimeError(f"Sonar initialization failed: {sonar_errors[0]}")
             if not sonar_thread.is_alive():
                 raise RuntimeError("Sonar worker stopped before initialization completed.")
             time.sleep(0.1)
+
+        logger.info("Sonar worker initialization confirmed. Waiting 1.0 second before camera open.")
+        time.sleep(1.0)
 
         frame_count, elapsed = run_camera_loop(camera_raw, video_path, logger, stop_event)
         stop_event.set()
