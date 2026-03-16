@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import yaml
 
-from src.sonar.ping_logger import PingSonarClient, SonarRecord, load_sonar_config, prepare_sonar
+from src.sonar.ping_logger import PingSonarClient, load_sonar_config
 from src.utils.logger import get_app_logger
 
 
@@ -77,7 +77,7 @@ def write_header(csv_path: Path) -> None:
 def append_row(
     csv_path: Path,
     sample_idx: int,
-    record: SonarRecord,
+    record,
     label: str,
     pose: str,
     offset_cm: float,
@@ -100,7 +100,7 @@ def append_row(
         )
 
 
-def summarize_records(records: list[SonarRecord]) -> dict[str, float | int | None]:
+def summarize_records(records: list) -> dict[str, float | int | None]:
     distances = [record.distance_mm for record in records if record.distance_mm is not None]
     confidences = [record.confidence for record in records if record.confidence is not None]
     unix_times = [record.unix_time for record in records]
@@ -144,7 +144,7 @@ def main() -> int:
         write_header(output_path)
 
         client = PingSonarClient(sonar_config, logger=logger)
-        first_record = prepare_sonar(client)
+        first_record = client.connect_and_validate()
         logger.info(
             "Sonar quick test ready. first_distance_mm=%s first_confidence=%s output=%s",
             first_record.distance_mm,
