@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import yaml
 
-from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream
+from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream, prepare_sonar
 from src.utils.logger import get_app_logger
 
 
@@ -39,7 +39,12 @@ def main() -> int:
         csv_path = Path(sonar_config.csv_path) if sonar_config.csv_path else PROJECT_ROOT / "data" / "sonar_log.csv"
 
         client = PingSonarClient(sonar_config, logger=logger)
-        client.connect()
+        first_record = prepare_sonar(client)
+        logger.info(
+            "Sonar ready after validation. first_distance_mm=%s first_confidence=%s",
+            first_record.distance_mm,
+            first_record.confidence,
+        )
         sample_count = log_sonar_stream(client, sonar_config, logger, csv_path=csv_path)
 
         logger.info("Sonar logging finished. samples=%d csv_path=%s", sample_count, csv_path)

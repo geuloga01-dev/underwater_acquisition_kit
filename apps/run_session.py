@@ -15,7 +15,7 @@ import yaml
 
 from src.camera.recording import VideoRecorder, load_recording_config
 from src.camera.webcam import WebcamCapture, load_camera_config
-from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream
+from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream, prepare_sonar
 from src.utils.logger import get_app_logger
 from src.utils.session import create_session_dirs, save_metadata, session_paths_to_dict
 
@@ -33,6 +33,14 @@ def resolve_log_level(*configs: dict) -> int:
     return logging.INFO
 
 
+def resolve_preview_setting(camera_raw: dict, camera_config, recording_config) -> tuple[bool, str]:
+    recording_section = camera_raw.get("recording", {})
+    preview_value = recording_section.get("preview")
+    if "preview" in recording_section and preview_value not in (None, ""):
+        return bool(recording_config.preview), "recording.preview"
+    return bool(camera_config.preview), "camera.preview"
+
+
 def run_sonar_worker(
     sonar_raw: dict,
     csv_path: Path,
@@ -46,7 +54,12 @@ def run_sonar_worker(
     try:
         sonar_config = load_sonar_config(sonar_raw)
         client = PingSonarClient(sonar_config, logger=logger)
-        client.connect()
+        first_record = prepare_sonar(client)
+        logger.info(
+            "Sonar worker ready. first_distance_mm=%s first_confidence=%s",
+            first_record.distance_mm,
+            first_record.confidence,
+        )
         ready_event.set()
         sample_count = log_sonar_stream(
             client,
@@ -72,8 +85,12 @@ def perform_sonar_quick_check(sonar_raw: dict, logger: logging.Logger) -> None:
     sonar_config = load_sonar_config(sonar_raw)
     client = PingSonarClient(sonar_config, logger=logger)
     try:
-        client.connect()
-        logger.info("Sonar quick check succeeded.")
+        first_record = prepare_sonar(client)
+        logger.info(
+            "Sonar quick check succeeded. first_distance_mm=%s first_confidence=%s",
+            first_record.distance_mm,
+            first_record.confidence,
+        )
     except Exception as exc:
         logger.exception("Sonar quick check failed before session start: %s", exc)
         raise RuntimeError(f"Sonar quick check failed: {exc}") from exc
@@ -86,6 +103,7 @@ def run_camera_loop(
     video_path: Path,
     logger: logging.Logger,
     stop_event: threading.Event,
+    preview_enabled: bool,
 ) -> tuple[int, float]:
     capture: WebcamCapture | None = None
     recorder: VideoRecorder | None = None
@@ -95,12 +113,19 @@ def run_camera_loop(
     try:
         camera_config = load_camera_config(camera_raw)
         recording_config = load_recording_config(camera_raw)
-        preview_enabled = recording_config.preview or camera_config.preview
 
         capture = WebcamCapture(camera_config, logger=logger)
         try:
-            logger.info("Opening camera after sonar initialization. source=%s backend=%s", camera_config.source, camera_config.backend)
+            logger.info(
+                "Camera open start. source=%s backend=%s width=%s height=%s fps=%s",
+                camera_config.source,
+                camera_config.backend,
+                camera_config.width,
+                camera_config.height,
+                camera_config.fps,
+            )
             capture.open()
+            logger.info("Camera open success. source=%s backend=%s", camera_config.source, camera_config.backend)
         except Exception as exc:
             logger.exception("Camera initialization failed: %s", exc)
             raise RuntimeError(f"Camera initialization failed: {exc}") from exc
@@ -170,6 +195,7 @@ def main() -> int:
         stop_event = threading.Event()
         sonar_ready = threading.Event()
         sonar_errors: list[BaseException] = []
+        preview_enabled, preview_source = resolve_preview_setting(camera_raw, camera_config, recording_config)
 
         metadata = {
             "session": session_paths_to_dict(session_paths),
@@ -190,11 +216,15 @@ def main() -> int:
         logger.info("Session video output: %s", video_path)
         logger.info("Session sonar output: %s", sonar_csv_path)
         logger.info(
+            "Preview resolved from %s: %s",
+            preview_source,
+            preview_enabled,
+        )
+        logger.info(
             "Session starting. preview=%s duration_seconds=%.1f",
-            recording_config.preview or camera_config.preview,
+            preview_enabled,
             recording_config.duration_seconds,
         )
-        logger.info("Preview is disabled by default unless camera.preview or recording.preview is set true.")
 
         perform_sonar_quick_check(sonar_raw, logger)
         logger.info("Waiting 1.0 second after sonar quick check before starting sonar worker.")
@@ -220,7 +250,13 @@ def main() -> int:
         logger.info("Sonar worker initialization confirmed. Waiting 1.0 second before camera open.")
         time.sleep(1.0)
 
-        frame_count, elapsed = run_camera_loop(camera_raw, video_path, logger, stop_event)
+        frame_count, elapsed = run_camera_loop(
+            camera_raw,
+            video_path,
+            logger,
+            stop_event,
+            preview_enabled=preview_enabled,
+        )
         stop_event.set()
         sonar_thread.join(timeout=5.0)
 

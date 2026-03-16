@@ -1,12 +1,12 @@
 camera:
   # Keep hardware-dependent settings here so Windows and Jetson can use the same code.
-  source: 1
-  backend: dshow
-  width: 640
-  height: 480
+  source: 0
+  backend: v4l2
+  width: 1920
+  height: 1080
   fps: 30
-  preview: false
-  autofocus: true
+  preview: true
+  autofocus: false
   focus:
   warmup_frames: 20
   window_name: "Underwater Acquisition Kit - Camera Test"
@@ -15,8 +15,8 @@ logging:
   level: INFO
 
 recording:
-  duration_seconds: 300
+  duration_seconds: 0
   preview: false
-  fourcc: mp4v
-  container: mp4
+  fourcc: XVID
+  container: avi
   output_path:

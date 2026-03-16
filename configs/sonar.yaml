@@ -1,5 +1,5 @@
 sonar:
-  port: "/dev/ttyUSB0"
+  port: "/dev/serial/by-id/usb-Diwell_Electronics_CP2102N_USB_to_UART_Bridge_Controller_f2b183c64395eb1198cc07608dca6574-if00-port0"
   baudrate: 115200
   sample_interval: 0.2
   csv_save: true

@@ -10,6 +10,11 @@ import time
 from typing import Any
 
 
+_MAX_CONNECT_ATTEMPTS = 5
+_RETRY_DELAY_SECONDS = 1.5
+_SERIAL_SETTLE_SECONDS = 0.75
+
+
 @dataclass(slots=True)
 class SonarConfig:
     port: str = "/dev/ttyUSB0"
@@ -55,6 +60,9 @@ class PingSonarClient:
         self._device = None
 
     def connect(self) -> None:
+        self.connect_and_validate()
+
+    def connect_and_validate(self) -> SonarRecord:
         try:
             from brping import Ping1D
         except ModuleNotFoundError as exc:
@@ -63,43 +71,105 @@ class PingSonarClient:
             ) from exc
 
         last_error: Exception | None = None
+        previous_attempt_started_at: float | None = None
 
-        for attempt in range(1, 6):
+        for attempt in range(1, _MAX_CONNECT_ATTEMPTS + 1):
+            attempt_started_at = time.monotonic()
+            elapsed_since_previous = (
+                None if previous_attempt_started_at is None else attempt_started_at - previous_attempt_started_at
+            )
+            previous_attempt_started_at = attempt_started_at
+            serial_open_success = False
+            initialize_called = False
+            initialize_result: bool | None = None
+
             try:
                 self.logger.info(
-                    "Connecting to Ping Sonar (attempt %d/5). port=%s baudrate=%s",
+                    "Sonar init start. attempt=%d/%d port=%s baudrate=%s since_previous_attempt=%s",
                     attempt,
+                    _MAX_CONNECT_ATTEMPTS,
                     self.config.port,
                     self.config.baudrate,
+                    "n/a" if elapsed_since_previous is None else f"{elapsed_since_previous:.2f}s",
                 )
 
                 self.close()
                 self._device = Ping1D()
+                self.logger.info("Sonar serial object create success. attempt=%d/%d", attempt, _MAX_CONNECT_ATTEMPTS)
                 self._device.connect_serial(self.config.port, self.config.baudrate)
-                if not self._device.initialize():
-                    raise RuntimeError(
-                        f"Could not initialize Ping Sonar device on {self.config.port} at {self.config.baudrate} baud."
-                    )
+                serial_open_success = True
+                self.logger.info(
+                    "Sonar serial open success. attempt=%d/%d port=%s baudrate=%s",
+                    attempt,
+                    _MAX_CONNECT_ATTEMPTS,
+                    self.config.port,
+                    self.config.baudrate,
+                )
+                self.logger.info(
+                    "Waiting %.2fs before initialize to let serial settle. attempt=%d/%d",
+                    _SERIAL_SETTLE_SECONDS,
+                    attempt,
+                    _MAX_CONNECT_ATTEMPTS,
+                )
+                time.sleep(_SERIAL_SETTLE_SECONDS)
+
+                initialize_called = True
+                self.logger.info("Calling sonar initialize(). attempt=%d/%d", attempt, _MAX_CONNECT_ATTEMPTS)
+                initialize_result = bool(self._device.initialize())
+                self.logger.info(
+                    "Sonar initialize returned: %s. attempt=%d/%d",
+                    initialize_result,
+                    attempt,
+                    _MAX_CONNECT_ATTEMPTS,
+                )
+                if not initialize_result:
+                    raise RuntimeError("Ping1D initialize returned False.")
+
+                self.logger.info("Running first sonar probe read. attempt=%d/%d", attempt, _MAX_CONNECT_ATTEMPTS)
+                first_message = self._device.get_distance()
+                if not first_message:
+                    raise RuntimeError("First distance read returned no data.")
+                first_record = normalize_record(first_message)
+                self.logger.info(
+                    "Sonar first probe read success. attempt=%d/%d distance_mm=%s confidence=%s",
+                    attempt,
+                    _MAX_CONNECT_ATTEMPTS,
+                    first_record.distance_mm,
+                    first_record.confidence,
+                )
 
                 self.logger.info(
                     "Connected to Ping Sonar. port=%s baudrate=%s",
                     self.config.port,
                     self.config.baudrate,
                 )
-                return
+                return first_record
             except Exception as exc:
                 last_error = exc
                 self.close()
                 self.logger.warning(
-                    "Ping Sonar initialization attempt %d/5 failed: %s",
+                    "Sonar init failed. attempt=%d/%d port=%s baudrate=%s serial_open_success=%s initialize_called=%s initialize_result=%s exception_class=%s exception=%s",
                     attempt,
+                    _MAX_CONNECT_ATTEMPTS,
+                    self.config.port,
+                    self.config.baudrate,
+                    serial_open_success,
+                    initialize_called,
+                    initialize_result,
+                    exc.__class__.__name__,
                     exc,
                 )
-                if attempt < 5:
-                    time.sleep(1.0)
+                if attempt < _MAX_CONNECT_ATTEMPTS:
+                    self.logger.info(
+                        "Sleeping %.2fs before next sonar init retry. next_attempt=%d/%d",
+                        _RETRY_DELAY_SECONDS,
+                        attempt + 1,
+                        _MAX_CONNECT_ATTEMPTS,
+                    )
+                    time.sleep(_RETRY_DELAY_SECONDS)
 
         raise RuntimeError(
-            f"Could not initialize Ping Sonar device on {self.config.port} after 5 attempts."
+            f"Could not initialize Ping Sonar device on {self.config.port} after {_MAX_CONNECT_ATTEMPTS} attempts."
         ) from last_error
 
     def read_record(self) -> SonarRecord:
@@ -126,6 +196,10 @@ class PingSonarClient:
                 except Exception:
                     pass
         self._device = None
+
+
+def prepare_sonar(client: PingSonarClient) -> SonarRecord:
+    return client.connect_and_validate()
 
 
 def normalize_record(raw_message: dict[str, Any]) -> SonarRecord:
