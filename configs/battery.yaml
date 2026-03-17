@@ -1,0 +1,12 @@
+battery:
+  port: "/dev/ttyACM0"
+  baudrate: 115200
+  poll_interval: 1.0
+  csv_save: true
+  csv_path:
+  low_remaining_threshold: 20.0
+  wait_heartbeat: false
+  heartbeat_timeout: 5.0
+
+logging:
+  level: INFO

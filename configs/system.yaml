@@ -1,0 +1,8 @@
+power:
+  idle_mode: 1
+  recording_mode: 0
+  heavy_mode: 2
+  use_jetson_clocks: false
+
+logging:
+  level: INFO

@@ -1,0 +1,9 @@
+network:
+  enabled: true
+  ssid: "your-jetson-ssid"
+  connection_name: "your-jetson-ssid"
+  check_interval: 10.0
+  reconnect_enabled: true
+
+logging:
+  level: INFO

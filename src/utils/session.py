@@ -14,6 +14,7 @@ class SessionPaths:
     root: Path
     video: Path
     sonar: Path
+    battery: Path
     logs: Path
     meta: Path
 
@@ -32,11 +33,12 @@ def create_session_dirs(base_dir: Path, session_name: str | None = None) -> Sess
         root=root,
         video=root / "video",
         sonar=root / "sonar",
+        battery=root / "battery",
         logs=root / "logs",
         meta=root / "meta",
     )
 
-    for path in (paths.root, paths.video, paths.sonar, paths.logs, paths.meta):
+    for path in (paths.root, paths.video, paths.sonar, paths.battery, paths.logs, paths.meta):
         path.mkdir(parents=True, exist_ok=True)
 
     return paths

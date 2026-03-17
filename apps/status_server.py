@@ -3,15 +3,16 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import sys
-import time
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import uvicorn
 import yaml
 
 from src.control.session_controller import SessionController
+from src.control.status_server import create_status_app
 from src.network.wifi_monitor import WifiMonitor, load_network_config
 from src.state.runtime_state import RuntimeState
 from src.system.power_manager import JetsonPowerManager, load_system_config
@@ -32,51 +33,41 @@ def resolve_log_level(*configs: dict) -> int:
 
 
 def main() -> int:
-    logger = get_app_logger("run_session_cli", PROJECT_ROOT / "logs")
+    logger = get_app_logger("status_server", PROJECT_ROOT / "logs")
     runtime_state = RuntimeState(PROJECT_ROOT / "data")
     wifi_monitor: WifiMonitor | None = None
-    session_controller: SessionController | None = None
 
     try:
+        server_raw = load_yaml_config(PROJECT_ROOT / "configs" / "server.yaml")
         network_raw = load_yaml_config(PROJECT_ROOT / "configs" / "network.yaml")
         system_raw = load_yaml_config(PROJECT_ROOT / "configs" / "system.yaml")
-        camera_raw = load_yaml_config(PROJECT_ROOT / "configs" / "camera.yaml")
-        sonar_raw = load_yaml_config(PROJECT_ROOT / "configs" / "sonar.yaml")
         battery_raw = load_yaml_config(PROJECT_ROOT / "configs" / "battery.yaml")
 
-        level = resolve_log_level(camera_raw, sonar_raw, battery_raw, network_raw, system_raw)
+        level = resolve_log_level(server_raw, network_raw, system_raw, battery_raw)
         logger.setLevel(level)
         for handler in logger.handlers:
             handler.setLevel(level)
 
+        host = str(server_raw.get("server", {}).get("host", "0.0.0.0"))
+        port = int(server_raw.get("server", {}).get("port", 8000))
+
         power_manager = JetsonPowerManager(load_system_config(system_raw), logger=logger)
         session_controller = SessionController(PROJECT_ROOT, runtime_state, power_manager=power_manager)
+        app = create_status_app(PROJECT_ROOT, runtime_state, session_controller)
 
         wifi_monitor = WifiMonitor(load_network_config(network_raw), runtime_state, logger=logger)
         wifi_monitor.start()
+        runtime_state.update_component("server", ready=True, running=True, ok=True, last_error=None)
 
-        result = session_controller.start_session(session_name="underwater_capture")
-        if not result.get("ok"):
-            logger.error("Failed to start session: %s", result)
-            return 1
-
-        logger.info("Local session started. session_id=%s", result.get("session_id"))
-
-        while session_controller.is_running():
-            time.sleep(0.5)
-
-        logger.info("Local session finished.")
-        return 0
-    except KeyboardInterrupt:
-        logger.info("Ctrl+C received. Requesting session stop.")
-        if session_controller is not None:
-            session_controller.stop_session()
-            session_controller.wait(timeout=5.0)
+        logger.info("Starting status server on %s:%s", host, port)
+        uvicorn.run(app, host=host, port=port, log_level="info")
         return 0
     except Exception as exc:
-        logger.exception("run_session CLI failed: %s", exc)
+        runtime_state.update_component("server", running=False, ok=False, last_error=str(exc))
+        logger.exception("Status server failed: %s", exc)
         return 1
     finally:
+        runtime_state.update_component("server", running=False, ok=runtime_state.server.ok, last_error=runtime_state.server.last_error)
         if wifi_monitor is not None:
             wifi_monitor.stop()
 

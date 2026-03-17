@@ -1,167 +1,211 @@
 # underwater_acquisition_kit
 
-Jetson Orin Nano based underwater data acquisition kit, developed first on a Windows laptop webcam and later extended to USB camera and sonar hardware on Jetson.
+Jetson-side underwater acquisition and control kit for a sealed vessel. Core acquisition is designed to stay local and keep recording even if Wi-Fi drops. Remote networking is optional for monitoring and control convenience only.
+
+## Architecture
+
+- Local acquisition is the priority.
+- Camera recording, sonar logging, battery logging, and metadata writing run on Jetson without requiring a remote client.
+- FastAPI status/control is optional and sits beside acquisition instead of underneath it.
+- Wi-Fi monitoring and Jetson power-mode switching are helpers. Failures there should warn and continue rather than stop the core data path.
 
 ## Project Layout
 
 ```text
 underwater_acquisition_kit/
-|- apps/                  # Executable entry points
+|- apps/
 |  |- camera_test.py
 |  |- camera_record.py
 |  |- sonar_logger.py
-|  `- run_session.py
-|- configs/               # Runtime configuration
+|  |- sonar_quick_test.py
+|  |- run_session.py
+|  `- status_server.py
+|- configs/
 |  |- camera.yaml
-|  `- sonar.yaml
-|- data/                  # Test data or captured outputs
-|- logs/                  # Runtime log files
-`- src/                   # Reusable modules
+|  |- sonar.yaml
+|  |- battery.yaml
+|  |- network.yaml
+|  |- system.yaml
+|  `- server.yaml
+|- data/
+|- logs/
+`- src/
    |- camera/
+   |- control/
+   |- network/
    |- sonar/
+   |- state/
+   |- system/
+   |- telemetry/
    `- utils/
 ```
 
-## Overview
+## New Modules
 
-- `camera_test.py` is the first MVP target and should run on a Windows laptop webcam right away.
-- `sonar_logger.py` is the first sonar logging scaffold for Ping Sonar R2.
-- `run_session.py` creates a session folder layout that can later store video, sonar, logs, and metadata together.
+- `src/control/session_controller.py`
+  Runs the integrated session flow and keeps the app layer thin.
+- `src/control/status_server.py`
+  Creates the FastAPI app with JSON status/control endpoints.
+- `src/telemetry/battery_listener.py`
+  Reads `BATTERY_STATUS` from Pixhawk MAVLink and writes battery CSV data.
+- `src/network/wifi_monitor.py`
+  Checks Wi-Fi state with `nmcli` and tries reconnect without blocking acquisition.
+- `src/system/power_manager.py`
+  Wraps `nvpmodel` and optional `jetson_clocks` in a safe helper.
+- `src/state/runtime_state.py`
+  Stores latest battery, session, camera, sonar, server, and network status in memory.
 
-## Why It Is Split This Way
+## Session Data Layout
 
-- `apps/` holds only the runnable scripts.
-- `src/camera/` keeps camera capture logic reusable so preview, recording, and future inference can share the same module.
-- `src/sonar/` separates device read, normalized record creation, local save, and future telemetry publish hooks.
-- `src/utils/` keeps shared logging and session helpers in one place.
-- `configs/` isolates hardware-dependent settings, which lets us switch from a laptop webcam to `/dev/video0` or `/dev/ttyUSB0` by editing YAML instead of changing code.
-- `logs/` is prepared from the start so camera, sonar, and session apps can share the same logging pattern.
+Each session creates:
+
+```text
+data/sessions/<session_id>/
+|- video/
+|- sonar/
+|- battery/
+|- logs/
+`- meta/
+```
+
+Typical outputs:
+
+- `video/camera_record.<container>`
+- `sonar/sonar_log.csv`
+- `battery/battery_log.csv`
+- `meta/session_metadata.json`
+- `logs/run_session.log`
+
+## Config Files
+
+### `configs/camera.yaml`
+
+- Camera source, backend, resolution, FPS, preview, autofocus
+- Recording duration, preview override, codec/container
+
+### `configs/sonar.yaml`
+
+- Ping Sonar serial port and baudrate
+- Sample interval, CSV output, telemetry hook flags
+
+### `configs/battery.yaml`
+
+- Pixhawk MAVLink port and baudrate
+- Battery poll interval
+- CSV output and low-battery threshold
+
+### `configs/network.yaml`
+
+- Target SSID / connection name
+- Wi-Fi check interval
+- Auto reconnect enable flag
+
+### `configs/system.yaml`
+
+- Logical Jetson states: `idle`, `recording`, `heavy`
+- Mapped `nvpmodel` mode IDs
+- Optional `jetson_clocks` usage
+
+### `configs/server.yaml`
+
+- FastAPI bind host and port
 
 ## Requirements
 
 - Python 3.10+
 - `opencv-python`
 - `PyYAML`
-- `brping` for Ping Sonar R2 support on the Jetson or Ubuntu side
+- `brping`
+- `pymavlink`
+- `fastapi`
+- `uvicorn`
 
 Example:
 
-```powershell
-pip install opencv-python PyYAML
+```bash
+pip install opencv-python PyYAML brping pymavlink fastapi uvicorn
 ```
 
-For sonar on Jetson or Ubuntu:
+## Local Session Run
 
-```powershell
-pip install brping
-```
+Run a full local session on Jetson:
 
-## Run Webcam Test
-
-From the project root:
-
-```powershell
-py -3 apps/camera_test.py
+```bash
+python3 apps/run_session.py
 ```
 
 What it does:
 
-- loads `configs/camera.yaml`
-- opens the configured camera source
-- applies optional camera controls such as autofocus
-- shows a live preview window
-- exits when you press `q`
-- writes logs to `logs/`
+- creates a new session folder
+- prepares sonar first
+- starts sonar logging
+- starts battery logging
+- opens camera and records locally
+- writes metadata and logs
+- continues locally even if Wi-Fi reconnect fails
+- stops cleanly on Ctrl+C
 
-## Camera Configuration
+## Status Server Run
 
-`configs/camera.yaml` controls the camera source without touching code.
+Run the optional remote status/control server:
 
-Examples:
-
-- Windows laptop webcam:
-
-```yaml
-camera:
-  source: 0
-  backend: dshow
-  preview: true
-  autofocus: true
+```bash
+python3 apps/status_server.py
 ```
 
-- Jetson USB camera:
+Current endpoints:
 
-```yaml
-camera:
-  source: "/dev/video0"
-  backend: v4l2
-```
+- `GET /status`
+- `GET /battery`
+- `GET /health`
+- `POST /session/start`
+- `POST /session/stop`
 
-Useful focus options:
+These endpoints return JSON only.
 
-- `autofocus: true` enables camera-side autofocus when supported.
-- `focus: 10` can be used for manual focus on supported cameras and backends.
-- `warmup_frames: 20` discards a few startup frames so focus and exposure can settle.
+## Battery Logging
 
-Useful recording options:
+Battery logging listens for MAVLink `BATTERY_STATUS` from Pixhawk, by default on `/dev/ttyACM0`.
 
-- `recording.duration_seconds: 300` runs a 5-minute capture for stability testing.
-- `recording.preview: false` avoids preview overhead during long recordings.
-- `recording.fourcc: mp4v` stores a simple `.mp4` file that is easy to inspect on Windows first.
+Logged fields:
 
-## Sonar Logging MVP
+- `timestamp_iso`
+- `unix_time`
+- `voltage_v`
+- `current_a`
+- `remaining_percent`
 
-`apps/sonar_logger.py` reads `configs/sonar.yaml`, tries to connect to Ping Sonar R2, normalizes each sample, optionally writes CSV, and leaves a telemetry packet creation hook in the reusable sonar module.
+The latest battery state is also exposed through the runtime state object and the `/battery` endpoint.
 
-Expected Jetson-side settings:
+If the battery listener fails, the failure is logged and camera/sonar acquisition can continue.
 
-```yaml
-sonar:
-  port: "/dev/ttyUSB0"
-  baudrate: 115200
-  sample_interval: 0.2
-  csv_save: true
-  telemetry_enabled: false
-```
+## Wi-Fi Auto Reconnect
 
-On a Windows laptop without the device attached, the app is expected to fail with a clear hardware-related message.
+Wi-Fi monitoring uses `nmcli`.
 
-## Session Layout MVP
+Behavior:
 
-`apps/run_session.py` creates:
+- periodically checks whether Jetson is connected to the configured SSID
+- if disconnected, tries reconnect with `nmcli connection up`
+- updates in-memory runtime state
+- logs warnings on failure
+- does not stop acquisition if reconnect fails
 
-```text
-data/sessions/<session_id>/
-|- video/
-|- sonar/
-|- logs/
-`- meta/
-```
+## Power Mode Manager
 
-This is intentionally a small scaffold first so later we can plug camera recording, sonar logging, metadata, and real-time processing into one session flow without rewriting the directory structure.
+The power manager wraps `nvpmodel` with logical states:
 
-Current behavior:
+- `idle`
+- `recording`
+- `heavy`
 
-- creates one `session_id`
-- records camera video to `video/camera_record.mp4`
-- logs sonar samples to `sonar/sonar_log.csv`
-- stores metadata in `meta/session_metadata.json`
-- writes session logs to `logs/run_session.log`
-- stops cleanly on `Ctrl+C`
+The actual numeric mode mapping comes from `configs/system.yaml`.
 
-## File Roles
+If a power-mode change fails, the system logs a warning and continues.
 
-- `apps/camera_test.py`: app entry point for preview testing.
-- `apps/sonar_logger.py`: app entry point for Ping Sonar logging.
-- `apps/run_session.py`: session scaffold that prepares per-run folders and metadata.
-- `src/camera/webcam.py`: reusable webcam capture module.
-- `src/sonar/ping_logger.py`: reusable Ping Sonar device read and CSV logging flow.
-- `src/utils/logger.py`: shared file and console logger setup.
-- `src/utils/session.py`: session ID, folder creation, and metadata helpers.
+## Design Notes
 
-## Notes For Next Phase
-
-- The current code avoids hardware-specific logic in the app layer.
-- When moving to Jetson, we should mainly adjust `configs/camera.yaml` and extend `src/camera/` for ExploreHD or GStreamer-specific pipelines if needed.
-- Sonar already exposes the flow `device read -> normalized record -> local save -> optional telemetry publish`, so a telemetry module can be attached later without changing the logger app shape.
-- Camera is still focused on capture and preview first, but the reusable module boundary is ready for a future inference layer.
+- Acquisition is network-independent by design.
+- App entry points stay thin and mostly wire config + runtime state + reusable modules together.
+- Hardware-sensitive settings are kept in YAML instead of hard-coded constants.
+- Camera and sonar MVP scripts remain available for isolated debugging.
