@@ -44,6 +44,7 @@ class WifiMonitor:
         self.logger = logger or logging.getLogger(__name__)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._ethernet_skip_logged = False
 
     def start(self) -> None:
         if not self.config.enabled:
@@ -66,6 +67,16 @@ class WifiMonitor:
 
         while not self._stop_event.is_set():
             try:
+                ethernet_connected, ethernet_device = self.is_ethernet_connected()
+                if ethernet_connected:
+                    self.state.set_network_status(True, f"ethernet:{ethernet_device}" if ethernet_device else "ethernet")
+                    if not self._ethernet_skip_logged:
+                        self.logger.info("Ethernet connected. Skipping Wi-Fi monitoring.")
+                        self._ethernet_skip_logged = True
+                    self._stop_event.wait(self.config.check_interval)
+                    continue
+
+                self._ethernet_skip_logged = False
                 connected, current_ssid = self.check_connection()
                 self.state.set_network_status(connected, current_ssid)
 
@@ -92,6 +103,25 @@ class WifiMonitor:
             ok=bool(self.state.network_connected),
             last_error=self.state.network.last_error,
         )
+
+    def is_ethernet_connected(self) -> tuple[bool, str | None]:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "nmcli device status check failed")
+
+        for line in result.stdout.splitlines():
+            parts = line.split(":")
+            if len(parts) < 3:
+                continue
+            device, dev_type, state = parts[0], parts[1], parts[2]
+            if dev_type == "ethernet" and state == "connected":
+                return True, device
+        return False, None
 
     def check_connection(self) -> tuple[bool, str | None]:
         result = subprocess.run(
