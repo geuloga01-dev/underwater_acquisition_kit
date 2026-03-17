@@ -209,8 +209,8 @@ class SessionController:
                     break
                 time.sleep(0.1)
 
-            self._run_camera_loop(camera_raw, video_path, logger, stop_event, preview_enabled)
-            active_camera = True
+            camera_result = self._run_camera_loop(camera_raw, video_path, logger, stop_event, preview_enabled)
+            active_camera = bool(camera_result["opened"])
 
             metadata_path = save_metadata(
                 session_paths.meta / "session_metadata.json",
@@ -225,6 +225,7 @@ class SessionController:
                         "sonar": active_sonar,
                         "battery": active_battery,
                     },
+                    "camera_runtime": camera_result,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 },
             )
@@ -329,9 +330,12 @@ class SessionController:
         logger: logging.Logger,
         stop_event: threading.Event,
         preview_enabled: bool,
-    ) -> None:
+    ) -> dict[str, Any]:
         capture: WebcamCapture | None = None
         recorder: VideoRecorder | None = None
+        opened = False
+        frame_count = 0
+        recording_started = False
         try:
             camera_config = load_camera_config(camera_raw)
             recording_config = load_recording_config(camera_raw)
@@ -339,6 +343,7 @@ class SessionController:
 
             logger.info("Camera open start. source=%s backend=%s", camera_config.source, camera_config.backend)
             capture.open()
+            opened = True
             self.runtime_state.update_component("camera", ready=True, running=True, ok=True, last_error=None)
             logger.info("Camera open success.")
 
@@ -350,8 +355,10 @@ class SessionController:
                 logger=logger,
             )
 
+            logger.info("Camera recording loop starting.")
             start_time = time.monotonic()
-            frame_count = 0
+            if stop_event.is_set():
+                logger.warning("Stop was requested before camera entered the recording loop.")
             while not stop_event.is_set():
                 ok, frame = capture.read()
                 if not ok:
@@ -359,6 +366,9 @@ class SessionController:
 
                 recorder.write(frame)
                 frame_count += 1
+                if not recording_started:
+                    recording_started = True
+                    logger.info("Camera recording started writing frames.")
 
                 if preview_enabled:
                     cv2.imshow(camera_config.window_name, frame)
@@ -374,7 +384,15 @@ class SessionController:
                     break
 
             elapsed = max(time.monotonic() - start_time, 0.001)
+            if frame_count == 0:
+                logger.warning("Camera session ended before any frames were recorded.")
             logger.info("Camera worker finished. frames=%d elapsed=%.2fs avg_fps=%.2f", frame_count, elapsed, frame_count / elapsed)
+            return {
+                "opened": opened,
+                "recording_started": recording_started,
+                "frames_written": frame_count,
+                "elapsed_seconds": elapsed,
+            }
         except Exception as exc:
             self.runtime_state.update_component("camera", running=False, ok=False, last_error=str(exc))
             raise

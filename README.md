@@ -155,6 +155,7 @@ What it does:
   - `camera: true/false`
   - `sonar: true/false`
   - `battery: true/false`
+- Session metadata also records camera runtime details such as whether recording actually started and how many frames were written.
 
 ## Status Server Run
 
@@ -187,6 +188,10 @@ Logged fields:
 - `remaining_percent`
 
 The latest battery state is also exposed through the runtime state object and the `/battery` endpoint.
+
+`BATTERY_STATUS.voltages` is parsed with MAVLink invalid-cell sentinel values filtered out, so pack voltage is not inflated by placeholder entries from unused cells.
+
+If battery voltage looks physically suspicious for this platform, the logger writes a warning but does not stop acquisition.
 
 If the battery listener fails, the failure is logged and camera/sonar acquisition can continue.
 

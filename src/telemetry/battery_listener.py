@@ -11,6 +11,10 @@ from typing import Any
 from src.state.runtime_state import RuntimeState
 
 
+_MAVLINK_VOLTAGE_INVALID = {0, 65534, 65535}
+_SUSPICIOUS_PLATFORM_VOLTAGE_V = 100.0
+
+
 @dataclass(slots=True)
 class BatteryConfig:
     port: str = "/dev/ttyACM0"
@@ -97,7 +101,12 @@ class BatteryListener:
 
 def normalize_battery_message(message: Any) -> BatteryRecord:
     now = datetime.now(timezone.utc)
-    voltages = [value for value in getattr(message, "voltages", []) if value and value > 0]
+    # BATTERY_STATUS.voltages uses UINT16_MAX / UINT16_MAX-1 sentinels for invalid cells.
+    voltages = [
+        value
+        for value in getattr(message, "voltages", [])
+        if value not in _MAVLINK_VOLTAGE_INVALID and value > 0
+    ]
     voltage_v = sum(voltages) / 1000.0 if voltages else None
 
     current_raw = getattr(message, "current_battery", -1)
@@ -167,6 +176,11 @@ def run_battery_logging_loop(
                 record.current_a,
                 record.remaining_percent,
             )
+            if record.voltage_v is not None and record.voltage_v > _SUSPICIOUS_PLATFORM_VOLTAGE_V:
+                logger.warning(
+                    "Battery voltage looks suspicious for this platform: %.3f V. Check MAVLink BATTERY_STATUS scaling.",
+                    record.voltage_v,
+                )
             if low_warning:
                 logger.warning(
                     "Battery remaining percentage is below threshold: %.1f <= %.1f",
