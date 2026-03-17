@@ -101,6 +101,7 @@ class SessionController:
         sonar_thread: threading.Thread | None = None
         battery_errors: list[BaseException] = []
         sonar_errors: list[BaseException] = []
+        battery_ready = threading.Event()
         sonar_ready = threading.Event()
 
         try:
@@ -129,6 +130,88 @@ class SessionController:
             video_path = session_paths.video / f"camera_record.{recording_config.container}"
             sonar_csv_path = session_paths.sonar / "sonar_log.csv"
             battery_csv_path = session_paths.battery / "battery_log.csv"
+            active_camera = False
+            active_sonar = False
+            active_battery = False
+
+            logger.info("Session created: %s", session_paths.root)
+            logger.info("Preview resolved from %s: %s", preview_source, preview_enabled)
+            logger.info("Acquisition is network-independent. Local recording continues without remote connectivity.")
+            logger.info("Sonar port prepared: %s", sonar_config.port)
+            logger.info("Battery port prepared: %s", battery_config.port)
+
+            try:
+                self._prepare_sonar(sonar_raw, logger)
+                active_sonar = True
+                self.runtime_state.update_component("sonar", ready=True, running=False, ok=True, last_error=None)
+            except Exception as exc:
+                logger.warning("Sonar unavailable for this session. Continuing without sonar: %s", exc)
+                self.runtime_state.update_component("sonar", ready=False, running=False, ok=False, last_error="unavailable")
+                active_sonar = False
+
+            if active_sonar:
+                logger.info("Waiting 1.0 second after sonar preparation before camera open.")
+                time.sleep(1.0)
+
+            battery_thread = threading.Thread(
+                target=self._run_battery_worker,
+                args=(battery_raw, battery_csv_path, logger, stop_event, battery_ready, battery_errors),
+                name="battery-worker",
+                daemon=True,
+            )
+            battery_thread.start()
+
+            if active_sonar:
+                sonar_thread = threading.Thread(
+                    target=self._run_sonar_worker,
+                    args=(sonar_raw, sonar_csv_path, logger, stop_event, sonar_ready, sonar_errors),
+                    name="sonar-worker",
+                    daemon=True,
+                )
+                sonar_thread.start()
+
+                while not sonar_ready.is_set():
+                    if sonar_errors:
+                        logger.warning(
+                            "Sonar worker failed during startup. Continuing without sonar: %s",
+                            sonar_errors[0],
+                        )
+                        active_sonar = False
+                        self.runtime_state.update_component(
+                            "sonar",
+                            ready=False,
+                            running=False,
+                            ok=False,
+                            last_error="unavailable",
+                        )
+                        break
+                    time.sleep(0.1)
+
+            for _ in range(20):
+                if battery_ready.is_set():
+                    active_battery = True
+                    break
+                if battery_errors:
+                    logger.warning(
+                        "Battery listener unavailable for this session. Continuing without battery logging: %s",
+                        battery_errors[0],
+                    )
+                    active_battery = False
+                    self.runtime_state.update_component(
+                        "battery",
+                        ready=False,
+                        running=False,
+                        ok=False,
+                        last_error="unavailable",
+                    )
+                    break
+                if battery_thread is None or not battery_thread.is_alive():
+                    break
+                time.sleep(0.1)
+
+            self._run_camera_loop(camera_raw, video_path, logger, stop_event, preview_enabled)
+            active_camera = True
+
             metadata_path = save_metadata(
                 session_paths.meta / "session_metadata.json",
                 {
@@ -137,45 +220,15 @@ class SessionController:
                     "recording": camera_raw.get("recording", {}),
                     "sonar": sonar_raw.get("sonar", {}),
                     "battery": battery_raw.get("battery", {}),
+                    "active_subsystems": {
+                        "camera": active_camera,
+                        "sonar": active_sonar,
+                        "battery": active_battery,
+                    },
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 },
             )
-
-            logger.info("Session created: %s", session_paths.root)
             logger.info("Metadata saved: %s", metadata_path)
-            logger.info("Preview resolved from %s: %s", preview_source, preview_enabled)
-            logger.info("Acquisition is network-independent. Local recording continues without remote connectivity.")
-            logger.info("Sonar port prepared: %s", sonar_config.port)
-            logger.info("Battery port prepared: %s", battery_config.port)
-
-            self._prepare_sonar(sonar_raw, logger)
-            self.runtime_state.update_component("sonar", ready=True, running=False, ok=True, last_error=None)
-
-            logger.info("Waiting 1.0 second after sonar preparation before camera open.")
-            time.sleep(1.0)
-
-            battery_thread = threading.Thread(
-                target=self._run_battery_worker,
-                args=(battery_raw, battery_csv_path, logger, stop_event, battery_errors),
-                name="battery-worker",
-                daemon=True,
-            )
-            battery_thread.start()
-
-            sonar_thread = threading.Thread(
-                target=self._run_sonar_worker,
-                args=(sonar_raw, sonar_csv_path, logger, stop_event, sonar_ready, sonar_errors),
-                name="sonar-worker",
-                daemon=True,
-            )
-            sonar_thread.start()
-
-            while not sonar_ready.is_set():
-                if sonar_errors:
-                    raise RuntimeError(f"Sonar worker initialization failed: {sonar_errors[0]}")
-                time.sleep(0.1)
-
-            self._run_camera_loop(camera_raw, video_path, logger, stop_event, preview_enabled)
 
             stop_event.set()
             if sonar_thread is not None:
@@ -183,14 +236,13 @@ class SessionController:
             if battery_thread is not None:
                 battery_thread.join(timeout=5.0)
 
-            if sonar_errors:
-                raise RuntimeError(f"Sonar logging failed during session: {sonar_errors[0]}")
             if battery_errors:
                 logger.warning("Battery logging ended with error but acquisition continued: %s", battery_errors[0])
+            if sonar_errors:
+                logger.warning("Sonar logging ended with error but acquisition continued: %s", sonar_errors[0])
         except Exception as exc:
             logger.exception("Session failed: %s", exc)
             self.runtime_state.update_component("camera", ok=False, last_error=str(exc))
-            self.runtime_state.update_component("sonar", ok=False, last_error=str(exc))
         finally:
             self.runtime_state.update_component("camera", running=False, ready=self.runtime_state.camera.ready, ok=self.runtime_state.camera.ok)
             self.runtime_state.update_component("sonar", running=False, ready=self.runtime_state.sonar.ready, ok=self.runtime_state.sonar.ok)
@@ -250,6 +302,7 @@ class SessionController:
         csv_path: Path,
         logger: logging.Logger,
         stop_event: threading.Event,
+        ready_event: threading.Event,
         error_list: list[BaseException],
     ) -> None:
         listener: BatteryListener | None = None
@@ -258,12 +311,13 @@ class SessionController:
             listener = BatteryListener(battery_config, logger=logger)
             listener.connect()
             self.runtime_state.update_component("battery", ready=True, running=True, ok=True, last_error=None)
+            ready_event.set()
             sample_count = run_battery_logging_loop(listener, battery_config, logger, self.runtime_state, csv_path, stop_event)
             logger.info("Battery worker stopped. samples=%d output=%s", sample_count, csv_path)
         except Exception as exc:
             error_list.append(exc)
             self.runtime_state.update_component("battery", running=False, ok=False, last_error=str(exc))
-            logger.exception("Battery worker failed: %s", exc)
+            logger.warning("Battery worker failed: %s", exc)
         finally:
             if listener is not None:
                 listener.close()

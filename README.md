@@ -137,13 +137,24 @@ python3 apps/run_session.py
 What it does:
 
 - creates a new session folder
-- prepares sonar first
-- starts sonar logging
-- starts battery logging
+- prepares sonar if available
+- starts sonar logging when available
+- starts battery logging when available
 - opens camera and records locally
 - writes metadata and logs
 - continues locally even if Wi-Fi reconnect fails
 - stops cleanly on Ctrl+C
+- keeps camera as the critical subsystem for the current MVP
+
+## Optional Sensor Behavior
+
+- Camera is the critical subsystem for the current MVP. If camera initialization fails, the session fails clearly.
+- Sonar is optional. If sonar is disconnected or initialization fails, the session logs a warning, marks sonar unavailable, and continues with camera-only or camera+battery capture.
+- Battery logging is optional. If the MAVLink battery listener fails, the session logs a warning and continues as long as camera recording is working.
+- Session metadata records which subsystems were active for that run:
+  - `camera: true/false`
+  - `sonar: true/false`
+  - `battery: true/false`
 
 ## Status Server Run
 
