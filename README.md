@@ -62,6 +62,7 @@ Each session creates:
 ```text
 data/sessions/<session_id>/
 |- video/
+|- timestamps/
 |- sonar/
 |- battery/
 |- logs/
@@ -71,6 +72,7 @@ data/sessions/<session_id>/
 Typical outputs:
 
 - `video/camera_record.<container>`
+- `timestamps/frame_timestamps.csv`
 - `sonar/sonar_log.csv`
 - `battery/battery_log.csv`
 - `meta/session_metadata.json`

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -89,3 +90,17 @@ class VideoRecorder:
         if self.writer is not None:
             self.writer.release()
             self.writer = None
+
+
+class FrameTimestampWriter:
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.output_path.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(["frame_id", "timestamp"])
+
+    def write(self, frame_id: int, timestamp: float) -> None:
+        with self.output_path.open("a", encoding="utf-8", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow([frame_id, timestamp])

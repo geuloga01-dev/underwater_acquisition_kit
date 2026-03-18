@@ -13,6 +13,7 @@ class SessionPaths:
     session_id: str
     root: Path
     video: Path
+    timestamps: Path
     sonar: Path
     battery: Path
     logs: Path
@@ -32,13 +33,14 @@ def create_session_dirs(base_dir: Path, session_name: str | None = None) -> Sess
         session_id=session_id,
         root=root,
         video=root / "video",
+        timestamps=root / "timestamps",
         sonar=root / "sonar",
         battery=root / "battery",
         logs=root / "logs",
         meta=root / "meta",
     )
 
-    for path in (paths.root, paths.video, paths.sonar, paths.battery, paths.logs, paths.meta):
+    for path in (paths.root, paths.video, paths.timestamps, paths.sonar, paths.battery, paths.logs, paths.meta):
         path.mkdir(parents=True, exist_ok=True)
 
     return paths
@@ -62,3 +64,9 @@ def slugify(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip())
     cleaned = re.sub(r"_+", "_", cleaned).strip("_")
     return cleaned or "session"
+
+
+def find_closest_sensor(timestamp: float, sensor_data: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not sensor_data:
+        return None
+    return min(sensor_data, key=lambda item: abs(float(item["timestamp"]) - timestamp))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import csv
 import logging
@@ -29,11 +29,18 @@ class BatteryConfig:
 
 @dataclass(slots=True)
 class BatteryRecord:
-    timestamp_iso: str
-    unix_time: float
+    timestamp: float
     voltage_v: float | None
     current_a: float | None
     remaining_percent: float | None
+
+    @property
+    def unix_time(self) -> float:
+        return self.timestamp
+
+    @property
+    def timestamp_iso(self) -> str:
+        return datetime.fromtimestamp(self.timestamp, timezone.utc).isoformat()
 
 
 def load_battery_config(raw_config: dict[str, Any]) -> BatteryConfig:
@@ -100,7 +107,7 @@ class BatteryListener:
 
 
 def normalize_battery_message(message: Any) -> BatteryRecord:
-    now = datetime.now(timezone.utc)
+    timestamp = time.time()
     # BATTERY_STATUS.voltages uses UINT16_MAX / UINT16_MAX-1 sentinels for invalid cells.
     voltages = [
         value
@@ -116,8 +123,7 @@ def normalize_battery_message(message: Any) -> BatteryRecord:
     remaining_percent = float(remaining_raw) if remaining_raw not in (-1, None) else None
 
     return BatteryRecord(
-        timestamp_iso=now.isoformat(),
-        unix_time=now.timestamp(),
+        timestamp=timestamp,
         voltage_v=voltage_v,
         current_a=current_a,
         remaining_percent=remaining_percent,
@@ -130,11 +136,18 @@ def append_battery_csv(csv_path: Path, record: BatteryRecord) -> None:
     with csv_path.open("a", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=["timestamp_iso", "unix_time", "voltage_v", "current_a", "remaining_percent"],
+            fieldnames=["timestamp", "voltage_v", "current_a", "remaining_percent"],
         )
         if write_header:
             writer.writeheader()
-        writer.writerow(asdict(record))
+        writer.writerow(
+            {
+                "timestamp": record.timestamp,
+                "voltage_v": record.voltage_v,
+                "current_a": record.current_a,
+                "remaining_percent": record.remaining_percent,
+            }
+        )
 
 
 def run_battery_logging_loop(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import csv
 import logging
@@ -27,10 +27,17 @@ class SonarConfig:
 
 @dataclass(slots=True)
 class SonarRecord:
-    timestamp_iso: str
-    unix_time: float
+    timestamp: float
     distance_mm: int | None
     confidence: int | None
+
+    @property
+    def unix_time(self) -> float:
+        return self.timestamp
+
+    @property
+    def timestamp_iso(self) -> str:
+        return datetime.fromtimestamp(self.timestamp, timezone.utc).isoformat()
 
 
 def load_sonar_config(raw_config: dict[str, Any]) -> SonarConfig:
@@ -203,10 +210,9 @@ def prepare_sonar(client: PingSonarClient) -> SonarRecord:
 
 
 def normalize_record(raw_message: dict[str, Any]) -> SonarRecord:
-    now = datetime.now(timezone.utc)
+    timestamp = time.time()
     return SonarRecord(
-        timestamp_iso=now.isoformat(),
-        unix_time=now.timestamp(),
+        timestamp=timestamp,
         distance_mm=_as_int(raw_message.get("distance")),
         confidence=_as_int(raw_message.get("confidence")),
     )
@@ -215,8 +221,7 @@ def normalize_record(raw_message: dict[str, Any]) -> SonarRecord:
 def build_telemetry_packet(record: SonarRecord) -> dict[str, Any]:
     # Keep packet generation separate so local logging and future telemetry publish stay decoupled.
     return {
-        "timestamp_iso": record.timestamp_iso,
-        "unix_time": record.unix_time,
+        "timestamp": record.timestamp,
         "distance_mm": record.distance_mm,
         "confidence": record.confidence,
     }
@@ -229,11 +234,17 @@ def append_csv_record(csv_path: Path, record: SonarRecord) -> None:
     with csv_path.open("a", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=["timestamp_iso", "unix_time", "distance_mm", "confidence"],
+            fieldnames=["timestamp", "distance_mm", "confidence"],
         )
         if write_header:
             writer.writeheader()
-        writer.writerow(asdict(record))
+        writer.writerow(
+            {
+                "timestamp": record.timestamp,
+                "distance_mm": record.distance_mm,
+                "confidence": record.confidence,
+            }
+        )
 
 
 def log_sonar_stream(

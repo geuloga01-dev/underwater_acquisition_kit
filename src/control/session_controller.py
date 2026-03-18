@@ -9,7 +9,7 @@ from typing import Any
 import cv2
 import yaml
 
-from src.camera.recording import VideoRecorder, load_recording_config
+from src.camera.recording import FrameTimestampWriter, VideoRecorder, load_recording_config
 from src.camera.webcam import WebcamCapture, load_camera_config
 from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream, prepare_sonar
 from src.state.runtime_state import RuntimeState
@@ -130,6 +130,7 @@ class SessionController:
             video_path = session_paths.video / f"camera_record.{recording_config.container}"
             sonar_csv_path = session_paths.sonar / "sonar_log.csv"
             battery_csv_path = session_paths.battery / "battery_log.csv"
+            session_start_time = time.time()
             active_camera = False
             active_sonar = False
             active_battery = False
@@ -212,9 +213,19 @@ class SessionController:
             camera_result = self._run_camera_loop(camera_raw, video_path, logger, stop_event, preview_enabled)
             active_camera = bool(camera_result["opened"])
 
+            active_sensors = ["camera"]
+            if active_sonar:
+                active_sensors.append("sonar")
+            if active_battery:
+                active_sensors.append("battery")
             metadata_path = save_metadata(
                 session_paths.meta / "session_metadata.json",
                 {
+                    "session_id": session_paths.session_id,
+                    "start_time": session_start_time,
+                    "camera_fps": camera_config.fps,
+                    "resolution": f"{camera_config.width}x{camera_config.height}",
+                    "sensors": active_sensors,
                     "session": session_paths_to_dict(session_paths),
                     "camera": camera_raw.get("camera", {}),
                     "recording": camera_raw.get("recording", {}),
@@ -333,6 +344,7 @@ class SessionController:
     ) -> dict[str, Any]:
         capture: WebcamCapture | None = None
         recorder: VideoRecorder | None = None
+        timestamp_writer: FrameTimestampWriter | None = None
         opened = False
         frame_count = 0
         recording_started = False
@@ -354,6 +366,7 @@ class SessionController:
                 fps=float(camera_config.fps or 30),
                 logger=logger,
             )
+            timestamp_writer = FrameTimestampWriter(video_path.parent.parent / "timestamps" / "frame_timestamps.csv")
 
             logger.info("Camera recording loop starting.")
             start_time = time.monotonic()
@@ -364,7 +377,11 @@ class SessionController:
                 if not ok:
                     raise RuntimeError("Failed to read a frame from the camera.")
 
+                frame_timestamp = time.time()
                 recorder.write(frame)
+                if timestamp_writer is not None:
+                    timestamp_writer.write(frame_count, frame_timestamp)
+                logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)
                 frame_count += 1
                 if not recording_started:
                     recording_started = True
