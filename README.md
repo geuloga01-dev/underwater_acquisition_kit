@@ -164,18 +164,25 @@ What it does:
 Run the optional remote status/control server:
 
 ```bash
-python3 apps/status_server.py
+pip install fastapi uvicorn
+uvicorn apps.status_server:app --host 0.0.0.0 --port 8000
 ```
 
 Current endpoints:
 
 - `GET /status`
 - `GET /battery`
-- `GET /health`
-- `POST /session/start`
-- `POST /session/stop`
 
 These endpoints return JSON only.
+
+## Running Status Server
+
+Use a mobile device or laptop on the same network to query the Jetson status server.
+
+```bash
+pip install fastapi uvicorn
+uvicorn apps.status_server:app --host 0.0.0.0 --port 8000
+```
 
 ## Battery Logging
 
