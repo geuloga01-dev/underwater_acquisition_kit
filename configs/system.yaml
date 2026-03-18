@@ -1,8 +1,11 @@
 power:
+  enabled: true
   idle_mode: 1
   recording_mode: 0
   heavy_mode: 2
   use_jetson_clocks: false
+  nvpmodel_path: "nvpmodel"
+  jetson_clocks_path: "jetson_clocks"
 
 logging:
   level: INFO

@@ -401,6 +401,7 @@ def create_status_app(
             "disk_free_gb": round(disk_usage.free / (1024 ** 3), 2),
             "wifi_status": wifi_status,
             "last_error": resolve_last_error(snapshot),
+            "power_warning": snapshot.get("power_warning"),
             "started_at": snapshot["session_started_at"],
         }
 

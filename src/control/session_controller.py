@@ -151,7 +151,12 @@ class SessionController:
             preview_enabled, preview_source = resolve_preview_setting(camera_raw, camera_config, recording_config)
 
             if self.power_manager is not None:
-                self.power_manager.set_mode("recording")
+                power_ok = self.power_manager.set_mode("recording")
+                if not power_ok:
+                    self.runtime_state.set_power_warning(self.power_manager.last_warning)
+                    logger.warning("Power manager optimization skipped: %s", self.power_manager.last_warning)
+                else:
+                    self.runtime_state.set_power_warning(None)
 
             self.runtime_state.update_component("camera", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("sonar", ready=False, running=False, ok=False, last_error=None)
@@ -296,7 +301,10 @@ class SessionController:
                 self._session_id = None
             logger.info("Runtime state cleared after stop.")
             if self.power_manager is not None:
-                self.power_manager.set_mode("idle")
+                power_ok = self.power_manager.set_mode("idle")
+                if not power_ok:
+                    self.runtime_state.set_power_warning(self.power_manager.last_warning)
+                    logger.warning("Power manager idle restore skipped: %s", self.power_manager.last_warning)
 
     def _prepare_sonar(self, sonar_raw: dict[str, Any], logger: logging.Logger) -> None:
         logger.info("Starting sonar preparation before camera open.")

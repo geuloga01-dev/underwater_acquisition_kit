@@ -47,6 +47,7 @@ class RuntimeState:
         self.latest_battery = BatteryState()
         self.network_connected: bool | None = None
         self.network_ssid: str | None = None
+        self.power_warning: str | None = None
         self.last_updated_at = _now_iso()
 
     def set_session(self, session_id: str | None, running: bool, stop_requested: bool = False) -> None:
@@ -72,6 +73,11 @@ class RuntimeState:
                 component.running = False
                 component.updated_at = _now_iso()
 
+            self.last_updated_at = _now_iso()
+
+    def set_power_warning(self, warning: str | None) -> None:
+        with self._lock:
+            self.power_warning = warning
             self.last_updated_at = _now_iso()
 
     def update_component(
@@ -143,6 +149,7 @@ class RuntimeState:
                 "latest_battery": asdict(self.latest_battery),
                 "network_connected": self.network_connected,
                 "network_ssid": self.network_ssid,
+                "power_warning": self.power_warning,
                 "last_updated_at": self.last_updated_at,
             }
 
