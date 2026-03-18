@@ -44,7 +44,7 @@ class WifiMonitor:
         self.logger = logger or logging.getLogger(__name__)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._ethernet_skip_logged = False
+        self._ethernet_active_logged = False
 
     def start(self) -> None:
         if not self.config.enabled:
@@ -68,28 +68,29 @@ class WifiMonitor:
         while not self._stop_event.is_set():
             try:
                 ethernet_connected, ethernet_device = self.is_ethernet_connected()
-                if ethernet_connected:
-                    self.state.set_network_status(True, f"ethernet:{ethernet_device}" if ethernet_device else "ethernet")
-                    if not self._ethernet_skip_logged:
-                        self.logger.info("Ethernet connected. Skipping Wi-Fi monitoring.")
-                        self._ethernet_skip_logged = True
-                    self._stop_event.wait(self.config.check_interval)
-                    continue
+                if ethernet_connected and not self._ethernet_active_logged:
+                    self.logger.info("Ethernet connected; Wi-Fi monitoring still active.")
+                    self._ethernet_active_logged = True
+                if not ethernet_connected:
+                    self._ethernet_active_logged = False
 
-                self._ethernet_skip_logged = False
-                connected, current_ssid = self.check_connection()
-                self.state.set_network_status(connected, current_ssid)
+                wifi_connected, current_ssid = self.check_connection()
+                overall_connected = ethernet_connected or wifi_connected
+                network_label = current_ssid or (f"ethernet:{ethernet_device}" if ethernet_connected else None)
+                self.state.set_network_status(overall_connected, network_label)
 
+                reconnect_target = self.config.connection_name or self.config.ssid
                 if self.config.ssid and current_ssid != self.config.ssid and self.config.reconnect_enabled:
                     self.logger.warning(
-                        "Wi-Fi disconnected or on unexpected SSID. expected=%s current=%s",
+                        "Wi-Fi disconnected or on unexpected SSID. expected=%s current=%s reconnect_target=%s",
                         self.config.ssid,
                         current_ssid,
+                        reconnect_target,
                     )
-                    reconnect_ok = self.try_reconnect()
+                    reconnect_ok = self.try_reconnect(reconnect_target)
                     if not reconnect_ok:
-                        self.state.set_network_status(False, current_ssid, last_error="reconnect failed")
-                elif connected:
+                        self.state.set_network_status(overall_connected, network_label, last_error="reconnect failed")
+                elif wifi_connected:
                     self.logger.debug("Wi-Fi monitor check ok. ssid=%s", current_ssid)
             except Exception as exc:
                 self.logger.warning("Wi-Fi monitor check failed: %s", exc)
@@ -138,8 +139,9 @@ class WifiMonitor:
                 return True, line.split(":", maxsplit=1)[1] or None
         return False, None
 
-    def try_reconnect(self) -> bool:
-        target = self.config.connection_name or self.config.ssid
+    def try_reconnect(self, target: str | None = None) -> bool:
+        if target is None:
+            target = self.config.connection_name or self.config.ssid
         if not target:
             self.logger.warning("Wi-Fi reconnect skipped because no SSID/connection name is configured.")
             return False
@@ -152,8 +154,8 @@ class WifiMonitor:
             check=False,
         )
         if result.returncode != 0:
-            self.logger.warning("Wi-Fi reconnect failed: %s", result.stderr.strip() or result.stdout.strip())
+            self.logger.warning("Wi-Fi reconnect failed. target=%s error=%s", target, result.stderr.strip() or result.stdout.strip())
             return False
 
-        self.logger.info("Wi-Fi reconnect command succeeded. target=%s", target)
+        self.logger.info("Wi-Fi reconnect succeeded. target=%s", target)
         return True
