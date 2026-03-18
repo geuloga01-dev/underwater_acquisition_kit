@@ -54,10 +54,33 @@ class SessionController:
         self._stop_event: threading.Event | None = None
         self._session_id: str | None = None
 
+    def _is_session_really_running_locked(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _cleanup_stale_session_locked(self) -> bool:
+        if self._thread is None and self._stop_event is None and self._session_id is None:
+            return False
+        if self._is_session_really_running_locked():
+            return False
+
+        stale_session_id = self._session_id
+        self._thread = None
+        self._stop_event = None
+        self._session_id = None
+        self.runtime_state.clear_session_runtime()
+        logging.getLogger(__name__).warning(
+            "Stale session state detected and cleared. session_id=%s",
+            stale_session_id,
+        )
+        return True
+
     def start_session(self, session_name: str | None = None) -> dict[str, Any]:
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            stale_cleared = self._cleanup_stale_session_locked()
+            if self._is_session_really_running_locked():
                 return {"ok": False, "message": "session already running", "session_id": self._session_id}
+            if stale_cleared:
+                logging.getLogger(__name__).info("New session start allowed after stale cleanup.")
 
             session_paths = create_session_dirs(self.project_root / "data", session_name or "underwater_capture")
             self._session_id = session_paths.session_id
@@ -75,7 +98,11 @@ class SessionController:
 
     def stop_session(self) -> dict[str, Any]:
         with self._lock:
-            if self._thread is None or not self._thread.is_alive() or self._stop_event is None:
+            stale_cleared = self._cleanup_stale_session_locked()
+            if stale_cleared:
+                logging.getLogger(__name__).info("Stop requested while session was already stale/stopped.")
+            if not self._is_session_really_running_locked() or self._stop_event is None:
+                self.runtime_state.clear_session_runtime()
                 return {"ok": False, "message": "no active session", "session_id": self._session_id}
 
             self.runtime_state.set_session(self._session_id, running=True, stop_requested=True)
@@ -84,12 +111,15 @@ class SessionController:
 
     def is_running(self) -> bool:
         with self._lock:
-            return self._thread is not None and self._thread.is_alive()
+            self._cleanup_stale_session_locked()
+            return self._is_session_really_running_locked()
 
     def wait(self, timeout: float | None = None) -> None:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=timeout)
+        with self._lock:
+            self._cleanup_stale_session_locked()
 
     def _run_session(self, session_paths, stop_event: threading.Event) -> None:
         logger = get_app_logger(
@@ -260,6 +290,11 @@ class SessionController:
             self.runtime_state.update_component("sonar", running=False, ready=self.runtime_state.sonar.ready, ok=self.runtime_state.sonar.ok)
             self.runtime_state.update_component("battery", running=False, ready=self.runtime_state.battery.ready, ok=self.runtime_state.battery.ok)
             self.runtime_state.set_session(None, running=False, stop_requested=False)
+            with self._lock:
+                self._thread = None
+                self._stop_event = None
+                self._session_id = None
+            logger.info("Runtime state cleared after stop.")
             if self.power_manager is not None:
                 self.power_manager.set_mode("idle")
 

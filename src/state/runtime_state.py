@@ -61,6 +61,19 @@ class RuntimeState:
                 self.session_started_at = None
             self.last_updated_at = _now_iso()
 
+    def clear_session_runtime(self) -> None:
+        with self._lock:
+            self.active_session_id = None
+            self.session_running = False
+            self.session_stop_requested = False
+            self.session_started_at = None
+
+            for component in (self.camera, self.sonar, self.battery):
+                component.running = False
+                component.updated_at = _now_iso()
+
+            self.last_updated_at = _now_iso()
+
     def update_component(
         self,
         component_name: str,
