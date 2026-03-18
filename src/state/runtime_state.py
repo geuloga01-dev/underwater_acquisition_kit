@@ -38,6 +38,7 @@ class RuntimeState:
         self.active_session_id: str | None = None
         self.session_running = False
         self.session_stop_requested = False
+        self.session_started_at: str | None = None
         self.camera = ComponentState()
         self.sonar = ComponentState()
         self.battery = ComponentState()
@@ -50,9 +51,14 @@ class RuntimeState:
 
     def set_session(self, session_id: str | None, running: bool, stop_requested: bool = False) -> None:
         with self._lock:
+            starting_new_session = running and session_id is not None and session_id != self.active_session_id
             self.active_session_id = session_id
             self.session_running = running
             self.session_stop_requested = stop_requested
+            if starting_new_session:
+                self.session_started_at = _now_iso()
+            elif not running:
+                self.session_started_at = None
             self.last_updated_at = _now_iso()
 
     def update_component(
@@ -115,6 +121,7 @@ class RuntimeState:
                 "active_session_id": self.active_session_id,
                 "session_running": self.session_running,
                 "session_stop_requested": self.session_stop_requested,
+                "session_started_at": self.session_started_at,
                 "camera": asdict(self.camera),
                 "sonar": asdict(self.sonar),
                 "battery": asdict(self.battery),

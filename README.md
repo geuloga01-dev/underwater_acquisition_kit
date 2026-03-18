@@ -159,29 +159,36 @@ What it does:
   - `battery: true/false`
 - Session metadata also records camera runtime details such as whether recording actually started and how many frames were written.
 
-## Status Server Run
+## Running Status Server
 
-Run the optional remote status/control server:
+Use a mobile device or laptop on the same network to query and control the Jetson status server.
 
 ```bash
 pip install fastapi uvicorn
 uvicorn apps.status_server:app --host 0.0.0.0 --port 8000
 ```
 
-Current endpoints:
+Available endpoints:
 
 - `GET /status`
+  Returns whether a session is active, the active/latest session ID, and metadata from the latest session when available.
 - `GET /battery`
+  Returns the latest battery values from `data/sessions/<latest_session>/battery/battery_log.csv`.
+- `GET /health`
+  Returns a lightweight runtime view with session activity, camera/sonar/battery worker state, free disk space, Wi-Fi status, and last error if present.
+- `GET /session/current`
+  Returns the current in-memory session state for quick debugging.
+- `POST /session/start`
+  Starts a new acquisition session using the shared `SessionController`. Duplicate start requests are rejected cleanly.
+- `POST /session/stop`
+  Requests a clean stop for the active session. If no session is running, it returns a safe JSON message instead of crashing.
 
-These endpoints return JSON only.
-
-## Running Status Server
-
-Use a mobile device or laptop on the same network to query the Jetson status server.
+Example control calls:
 
 ```bash
-pip install fastapi uvicorn
-uvicorn apps.status_server:app --host 0.0.0.0 --port 8000
+curl -X POST http://<jetson-ip>:8000/session/start
+curl http://<jetson-ip>:8000/health
+curl -X POST http://<jetson-ip>:8000/session/stop
 ```
 
 ## Battery Logging
