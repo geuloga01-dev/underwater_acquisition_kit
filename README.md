@@ -178,14 +178,20 @@ Available endpoints:
   Returns a lightweight runtime view with session activity, camera/sonar/battery worker state, free disk space, Wi-Fi status, and last error if present.
 - `GET /session/current`
   Returns the current in-memory session state for quick debugging.
+- `GET /session/start`
+  Browser-testable session start endpoint. Starts a new session when idle and rejects duplicate starts cleanly.
 - `POST /session/start`
   Starts a new acquisition session using the shared `SessionController`. Duplicate start requests are rejected cleanly.
+- `GET /session/stop`
+  Browser-testable session stop endpoint. Stops the active session safely and returns a clean message when idle.
 - `POST /session/stop`
   Requests a clean stop for the active session. If no session is running, it returns a safe JSON message instead of crashing.
 
 Example control calls:
 
 ```bash
+curl http://<jetson-ip>:8000/session/start
+curl http://<jetson-ip>:8000/session/stop
 curl -X POST http://<jetson-ip>:8000/session/start
 curl http://<jetson-ip>:8000/health
 curl -X POST http://<jetson-ip>:8000/session/stop

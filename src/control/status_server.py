@@ -91,6 +91,47 @@ def create_status_app(
 ) -> FastAPI:
     app = FastAPI(title="Underwater Acquisition Kit Status Server")
 
+    def start_session_response(session_name: str | None = None, request_method: str = "POST") -> dict[str, Any]:
+        logger.info("Session start requested. method=%s session_name=%s", request_method, session_name)
+        result = session_controller.start_session(session_name=session_name)
+        if result.get("ok"):
+            logger.info("Session started. session_id=%s", result.get("session_id"))
+        else:
+            logger.info("Duplicate start rejected. session_id=%s", result.get("session_id"))
+        return {
+            "success": bool(result.get("ok")),
+            "session_id": result.get("session_id"),
+            "message": result.get("message"),
+            "started_at": runtime_state.snapshot().get("session_started_at"),
+        }
+
+    def stop_session_response(request_method: str = "POST") -> dict[str, Any]:
+        logger.info("Session stop requested. method=%s", request_method)
+        result = session_controller.stop_session()
+        if not result.get("ok"):
+            logger.info("Stop requested with no active session.")
+            return {
+                "success": False,
+                "session_id": result.get("session_id"),
+                "message": result.get("message"),
+                "stopped_at": runtime_state.snapshot().get("last_updated_at"),
+            }
+
+        session_controller.wait(timeout=2.0)
+        if session_controller.is_running():
+            logger.info("Session stop still in progress. session_id=%s", result.get("session_id"))
+            message = "session stop requested"
+        else:
+            logger.info("Session stopped. session_id=%s", result.get("session_id"))
+            message = "session stopped"
+
+        return {
+            "success": True,
+            "session_id": result.get("session_id"),
+            "message": message,
+            "stopped_at": runtime_state.snapshot().get("last_updated_at"),
+        }
+
     @app.on_event("startup")
     def on_startup() -> None:
         logger.info("Status server started.")
@@ -180,31 +221,21 @@ def create_status_app(
     def start_session(payload: SessionStartRequest | None = None) -> dict[str, Any]:
         logger.info("Request received: POST /session/start")
         session_name = payload.session_name if payload is not None else None
-        result = session_controller.start_session(session_name=session_name)
-        if result.get("ok"):
-            logger.info("Session started. session_id=%s", result.get("session_id"))
-        else:
-            logger.info("Duplicate session start rejected. session_id=%s", result.get("session_id"))
-        return {
-            "success": bool(result.get("ok")),
-            "session_id": result.get("session_id"),
-            "message": result.get("message"),
-            "started_at": runtime_state.snapshot().get("session_started_at"),
-        }
+        return start_session_response(session_name=session_name, request_method="POST")
+
+    @app.get("/session/start")
+    def start_session_get(session_name: str | None = None) -> dict[str, Any]:
+        logger.info("Request received: GET /session/start")
+        return start_session_response(session_name=session_name, request_method="GET")
 
     @app.post("/session/stop")
     def stop_session() -> dict[str, Any]:
         logger.info("Request received: POST /session/stop")
-        result = session_controller.stop_session()
-        if result.get("ok"):
-            logger.info("Session stop requested. session_id=%s", result.get("session_id"))
-        else:
-            logger.info("Session stop requested with no active session.")
-        return {
-            "success": bool(result.get("ok")),
-            "session_id": result.get("session_id"),
-            "message": result.get("message"),
-            "stopped_at": runtime_state.snapshot().get("last_updated_at"),
-        }
+        return stop_session_response(request_method="POST")
+
+    @app.get("/session/stop")
+    def stop_session_get() -> dict[str, Any]:
+        logger.info("Request received: GET /session/stop")
+        return stop_session_response(request_method="GET")
 
     return app
