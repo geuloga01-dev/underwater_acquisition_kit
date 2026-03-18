@@ -8,6 +8,7 @@ import shutil
 from typing import Any, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from src.control.session_controller import SessionController
@@ -91,6 +92,201 @@ def create_status_app(
 ) -> FastAPI:
     app = FastAPI(title="Underwater Acquisition Kit Status Server")
 
+    dashboard_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Underwater Acquisition Kit</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f7f8;
+      --card: #ffffff;
+      --text: #102027;
+      --muted: #607d8b;
+      --ok: #1b8f4d;
+      --bad: #c0392b;
+      --accent: #0b7285;
+      --border: #d8e2e7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #eef5f7 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 20px 16px 32px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: 0 8px 24px rgba(16, 32, 39, 0.06);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 1.5rem;
+    }
+    p {
+      margin: 0;
+      color: var(--muted);
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    button {
+      border: none;
+      border-radius: 12px;
+      padding: 14px 16px;
+      font-size: 1rem;
+      font-weight: 600;
+      color: white;
+      cursor: pointer;
+    }
+    button.start { background: var(--ok); }
+    button.stop { background: var(--bad); }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .status-row:last-child { border-bottom: none; }
+    .label { color: var(--muted); }
+    .value {
+      text-align: right;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .pill {
+      display: inline-block;
+      min-width: 88px;
+      text-align: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.9rem;
+      color: white;
+      background: var(--bad);
+    }
+    .pill.ok { background: var(--ok); }
+    .message {
+      margin-top: 12px;
+      min-height: 24px;
+      color: var(--accent);
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Underwater Acquisition Kit</h1>
+      <p>Remote monitor and control panel</p>
+      <div class="actions">
+        <button class="start" onclick="startSession()">START</button>
+        <button class="stop" onclick="stopSession()">STOP</button>
+      </div>
+      <div class="message" id="message">Ready.</div>
+    </div>
+
+    <div class="card">
+      <div class="status-row"><span class="label">session_active</span><span class="value" id="session_active">-</span></div>
+      <div class="status-row"><span class="label">active_session_id</span><span class="value" id="active_session_id">-</span></div>
+      <div class="status-row"><span class="label">battery_voltage</span><span class="value" id="battery_voltage">-</span></div>
+      <div class="status-row"><span class="label">battery_percent</span><span class="value" id="battery_percent">-</span></div>
+      <div class="status-row"><span class="label">camera_running</span><span class="value" id="camera_running">-</span></div>
+      <div class="status-row"><span class="label">sonar_running</span><span class="value" id="sonar_running">-</span></div>
+    </div>
+  </div>
+
+  <script>
+    function setText(id, value) {
+      document.getElementById(id).textContent = value ?? "-";
+    }
+
+    function setBool(id, value) {
+      const element = document.getElementById(id);
+      const active = Boolean(value);
+      element.innerHTML = '<span class="pill' + (active ? ' ok' : '') + '">' + (active ? 'true' : 'false') + '</span>';
+    }
+
+    function showMessage(text) {
+      document.getElementById('message').textContent = text;
+    }
+
+    async function fetchJson(url, options) {
+      const response = await fetch(url, options);
+      return await response.json();
+    }
+
+    async function refreshStatus() {
+      try {
+        const [health, battery] = await Promise.all([
+          fetchJson('/health'),
+          fetchJson('/battery'),
+        ]);
+
+        setBool('session_active', health.session_active);
+        setText('active_session_id', health.active_session_id || '-');
+        setBool('camera_running', health.camera_running);
+        setBool('sonar_running', health.sonar_running);
+
+        if (battery && battery.voltage != null) {
+          setText('battery_voltage', Number(battery.voltage).toFixed(2) + ' V');
+        } else {
+          setText('battery_voltage', battery.status || '-');
+        }
+
+        if (battery && battery.percent != null) {
+          setText('battery_percent', Number(battery.percent).toFixed(1) + ' %');
+        } else {
+          setText('battery_percent', battery.status || '-');
+        }
+      } catch (error) {
+        showMessage('Status update failed: ' + error);
+      }
+    }
+
+    async function startSession() {
+      showMessage('Starting session...');
+      try {
+        const result = await fetchJson('/session/start');
+        showMessage(result.message || 'session start requested');
+        await refreshStatus();
+      } catch (error) {
+        showMessage('Start failed: ' + error);
+      }
+    }
+
+    async function stopSession() {
+      showMessage('Stopping session...');
+      try {
+        const result = await fetchJson('/session/stop');
+        showMessage(result.message || 'session stop requested');
+        await refreshStatus();
+      } catch (error) {
+        showMessage('Stop failed: ' + error);
+      }
+    }
+
+    refreshStatus();
+    setInterval(refreshStatus, 1000);
+  </script>
+</body>
+</html>
+"""
+
     def start_session_response(session_name: str | None = None, request_method: str = "POST") -> dict[str, Any]:
         logger.info("Session start requested. method=%s session_name=%s", request_method, session_name)
         result = session_controller.start_session(session_name=session_name)
@@ -145,6 +341,11 @@ def create_status_app(
         if wifi_monitor is not None:
             wifi_monitor.stop()
         runtime_state.update_component("server", running=False, ok=True, last_error=None)
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard() -> HTMLResponse:
+        logger.info("Request received: GET /")
+        return HTMLResponse(content=dashboard_html)
 
     @app.get("/status")
     def get_status() -> dict[str, Any]:
