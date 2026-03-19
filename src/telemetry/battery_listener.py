@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +13,7 @@ from src.state.runtime_state import RuntimeState
 
 
 _MAVLINK_VOLTAGE_INVALID = {0, 65534, 65535}
+_MAVLINK_BATTERY_TEMP_INVALID = {None, 32767}
 _SUSPICIOUS_PLATFORM_VOLTAGE_V = 100.0
 
 
@@ -34,6 +35,7 @@ class BatteryRecord:
     voltage_v: float | None
     current_a: float | None
     remaining_percent: float | None
+    battery_temp_c: float | None
 
     @property
     def unix_time(self) -> float:
@@ -109,12 +111,7 @@ class BatteryListener:
 
 def normalize_battery_message(message: Any) -> BatteryRecord:
     timestamp = time.time()
-    # BATTERY_STATUS.voltages uses UINT16_MAX / UINT16_MAX-1 sentinels for invalid cells.
-    voltages = [
-        value
-        for value in getattr(message, "voltages", [])
-        if value not in _MAVLINK_VOLTAGE_INVALID and value > 0
-    ]
+    voltages = [value for value in getattr(message, "voltages", []) if value not in _MAVLINK_VOLTAGE_INVALID and value > 0]
     voltage_v = sum(voltages) / 1000.0 if voltages else None
 
     current_raw = getattr(message, "current_battery", -1)
@@ -123,11 +120,15 @@ def normalize_battery_message(message: Any) -> BatteryRecord:
     remaining_raw = getattr(message, "battery_remaining", -1)
     remaining_percent = float(remaining_raw) if remaining_raw not in (-1, None) else None
 
+    temperature_raw = getattr(message, "temperature", None)
+    battery_temp_c = temperature_raw / 100.0 if temperature_raw not in _MAVLINK_BATTERY_TEMP_INVALID else None
+
     return BatteryRecord(
         timestamp=timestamp,
         voltage_v=voltage_v,
         current_a=current_a,
         remaining_percent=remaining_percent,
+        battery_temp_c=battery_temp_c,
     )
 
 
@@ -135,10 +136,7 @@ def append_battery_csv(csv_path: Path, record: BatteryRecord) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not csv_path.exists()
     with csv_path.open("a", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=["timestamp", "voltage_v", "current_a", "remaining_percent"],
-        )
+        writer = csv.DictWriter(file, fieldnames=["timestamp", "voltage_v", "current_a", "remaining_percent", "battery_temp_c"])
         if write_header:
             writer.writeheader()
         writer.writerow(
@@ -147,6 +145,7 @@ def append_battery_csv(csv_path: Path, record: BatteryRecord) -> None:
                 "voltage_v": record.voltage_v,
                 "current_a": record.current_a,
                 "remaining_percent": record.remaining_percent,
+                "battery_temp_c": record.battery_temp_c,
             }
         )
 
@@ -169,26 +168,25 @@ def run_battery_logging_loop(
             if record is None:
                 continue
 
-            low_warning = (
-                record.remaining_percent is not None
-                and record.remaining_percent <= config.low_remaining_threshold
-            )
+            low_warning = record.remaining_percent is not None and record.remaining_percent <= config.low_remaining_threshold
             state.set_battery_state(
                 timestamp_iso=record.timestamp_iso,
                 unix_time=record.unix_time,
                 voltage_v=record.voltage_v,
                 current_a=record.current_a,
                 remaining_percent=record.remaining_percent,
+                battery_temp_c=record.battery_temp_c,
                 low_warning=low_warning,
             )
             if csv_path is not None and config.csv_save:
                 append_battery_csv(csv_path, record)
 
             logger.info(
-                "Battery sample voltage_v=%s current_a=%s remaining_percent=%s",
+                "Battery sample voltage_v=%s current_a=%s remaining_percent=%s battery_temp_c=%s",
                 record.voltage_v,
                 record.current_a,
                 record.remaining_percent,
+                record.battery_temp_c,
             )
             if record.voltage_v is not None and record.voltage_v > _SUSPICIOUS_PLATFORM_VOLTAGE_V:
                 logger.warning(

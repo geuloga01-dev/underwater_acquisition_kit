@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import json
@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import statistics
 import subprocess
+import threading
 from typing import Any, Optional
 import re
 
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 from src.control.session_controller import SessionController
 from src.network.wifi_monitor import WifiMonitor
 from src.state.runtime_state import RuntimeState
+from src.telemetry.battery_listener import BatteryConfig, BatteryListener
 
 
 _THERMAL_ZONE_CACHE: dict[str, Path | None] | None = None
@@ -28,6 +30,73 @@ _TEGRSTATS_FAILURE_LOGGED = False
 
 class SessionStartRequest(BaseModel):
     session_name: Optional[str] = None
+
+
+class BackgroundBatteryMonitor:
+    def __init__(self, config: BatteryConfig, runtime_state: RuntimeState, logger: logging.Logger) -> None:
+        self.config = config
+        self.runtime_state = runtime_state
+        self.logger = logger
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_loop, name="status-battery-monitor", daemon=True)
+        self._thread.start()
+        self.logger.info("Background battery monitor started.")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _run_loop(self) -> None:
+        listener: BatteryListener | None = None
+
+        while not self._stop_event.is_set():
+            try:
+                if self.runtime_state.session_running:
+                    if listener is not None:
+                        listener.close()
+                        listener = None
+                    self._stop_event.wait(self.config.poll_interval)
+                    continue
+
+                if listener is None:
+                    listener = BatteryListener(self.config, logger=self.logger)
+                    listener.connect()
+
+                record = listener.read_record(timeout=self.config.poll_interval)
+                if record is None:
+                    continue
+
+                low_warning = (
+                    record.remaining_percent is not None
+                    and record.remaining_percent <= self.config.low_remaining_threshold
+                )
+                self.runtime_state.set_battery_state(
+                    timestamp_iso=record.timestamp_iso,
+                    unix_time=record.unix_time,
+                    voltage_v=record.voltage_v,
+                    current_a=record.current_a,
+                    remaining_percent=record.remaining_percent,
+                    battery_temp_c=record.battery_temp_c,
+                    low_warning=low_warning,
+                )
+                self.runtime_state.update_component("battery", ready=True, running=False, ok=True, last_error=None)
+            except Exception as exc:
+                self.logger.warning("Background battery monitor read failed: %s", exc)
+                self.runtime_state.update_component("battery", running=False, ok=False, last_error=str(exc))
+                if listener is not None:
+                    listener.close()
+                    listener = None
+                self._stop_event.wait(max(self.config.poll_interval, 1.0))
+
+        if listener is not None:
+            listener.close()
 
 
 def find_latest_session_dir(project_root: Path) -> Path | None:
@@ -81,6 +150,91 @@ def read_latest_battery_row(csv_path: Path, logger: logging.Logger) -> dict[str,
         "voltage": _as_float(latest.get("voltage_v")),
         "current": _as_float(latest.get("current_a")),
         "percent": _as_float(latest.get("remaining_percent")),
+        "battery_temp_c": _as_float(latest.get("battery_temp_c")),
+        "last_updated": _as_float(latest.get("timestamp")),
+    }
+
+
+def _recent_battery_rows(csv_path: Path, logger: logging.Logger, sample_count: int = 5) -> list[dict[str, float | None]]:
+    if not csv_path.exists():
+        return []
+
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+    except Exception as exc:
+        logger.warning("Failed to read battery history %s: %s", csv_path, exc)
+        return []
+
+    recent_rows = rows[-sample_count:]
+    return [
+        {
+            "unix_time": _as_float(row.get("timestamp")),
+            "voltage_v": _as_float(row.get("voltage_v")),
+            "current_a": _as_float(row.get("current_a")),
+            "remaining_percent": _as_float(row.get("remaining_percent")),
+            "battery_temp_c": _as_float(row.get("battery_temp_c")),
+        }
+        for row in recent_rows
+    ]
+
+
+def _base_battery_state(voltage_v: float | None, battery_temp_c: float | None) -> str:
+    if voltage_v is None and battery_temp_c is None:
+        return "WARNING"
+    if voltage_v is not None and voltage_v < 13.2:
+        return "EMERGENCY"
+    if battery_temp_c is not None and battery_temp_c >= 60.0:
+        return "EMERGENCY"
+    if voltage_v is not None and voltage_v < 14.0:
+        return "CRITICAL"
+    if battery_temp_c is not None and battery_temp_c >= 55.0:
+        return "CRITICAL"
+    if voltage_v is not None and voltage_v < 14.8:
+        return "WARNING"
+    if battery_temp_c is not None and battery_temp_c >= 45.0:
+        return "WARNING"
+    return "NORMAL"
+
+
+def _escalate_battery_state(state: str) -> str:
+    order = ["NORMAL", "WARNING", "CRITICAL", "EMERGENCY"]
+    try:
+        index = order.index(state)
+    except ValueError:
+        return state
+    return order[min(index + 1, len(order) - 1)]
+
+
+def classify_battery_status(
+    voltage_v: float | None,
+    current_a: float | None,
+    battery_temp_c: float | None,
+    recent_rows: list[dict[str, float | None]],
+) -> dict[str, Any]:
+    battery_state = _base_battery_state(voltage_v, battery_temp_c)
+    sag_detected = False
+
+    valid_rows = [row for row in recent_rows if row.get("unix_time") is not None and row.get("voltage_v") is not None]
+    if len(valid_rows) >= 2:
+        latest_row = valid_rows[-1]
+        for previous_row in reversed(valid_rows[:-1]):
+            if latest_row["unix_time"] is None or previous_row["unix_time"] is None:
+                continue
+            if latest_row["unix_time"] - previous_row["unix_time"] > 5.0:
+                break
+            voltage_drop = (previous_row["voltage_v"] or 0.0) - (latest_row["voltage_v"] or 0.0)
+            if voltage_drop > 0.5:
+                sag_detected = True
+                battery_state = _escalate_battery_state(battery_state)
+                break
+
+    return {
+        "battery_state": battery_state,
+        "battery_voltage": voltage_v,
+        "battery_current": current_a,
+        "battery_temp": battery_temp_c,
+        "voltage_sag_detected": sag_detected,
     }
 
 
@@ -379,6 +533,7 @@ def create_status_app(
     *,
     logger: logging.Logger,
     wifi_monitor: WifiMonitor | None = None,
+    background_battery_monitor: BackgroundBatteryMonitor | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Underwater Acquisition Kit Status Server")
 
@@ -497,6 +652,8 @@ def create_status_app(
       <div class="status-row"><span class="label">active_session_id</span><span class="value" id="active_session_id">-</span></div>
       <div class="status-row"><span class="label">battery_voltage</span><span class="value" id="battery_voltage">-</span></div>
       <div class="status-row"><span class="label">battery_percent</span><span class="value" id="battery_percent">-</span></div>
+      <div class="status-row"><span class="label">battery_temp</span><span class="value" id="battery_temp">-</span></div>
+      <div class="status-row"><span class="label">battery_state</span><span class="value" id="battery_state">-</span></div>
       <div class="status-row"><span class="label">camera_running</span><span class="value" id="camera_running">-</span></div>
       <div class="status-row"><span class="label">sonar_running</span><span class="value" id="sonar_running">-</span></div>
     </div>
@@ -565,6 +722,24 @@ def create_status_app(
           setText('battery_percent', Number(battery.percent).toFixed(1) + ' %');
         } else {
           setText('battery_percent', battery.status || '-');
+        }
+
+        if (battery && battery.battery_temp_c != null) {
+          setText('battery_temp', Number(battery.battery_temp_c).toFixed(1) + ' C');
+        } else {
+          setText('battery_temp', '-');
+        }
+
+        if (battery && battery.battery_state) {
+          if (battery.battery_state === 'NORMAL') {
+            setStatusPill('battery_state', battery.battery_state, 'ok');
+          } else if (battery.battery_state === 'WARNING') {
+            setStatusPill('battery_state', battery.battery_state, 'warn');
+          } else {
+            setStatusPill('battery_state', battery.battery_state, 'bad');
+          }
+        } else {
+          setStatusPill('battery_state', 'unknown', 'unknown');
         }
 
         if (sonar && sonar.distance_m != null) {
@@ -689,10 +864,14 @@ def create_status_app(
         runtime_state.update_component("server", ready=True, running=True, ok=True, last_error=None)
         if wifi_monitor is not None:
             wifi_monitor.start()
+        if background_battery_monitor is not None:
+            background_battery_monitor.start()
 
     @app.on_event("shutdown")
     def on_shutdown() -> None:
         logger.info("Status server shutting down.")
+        if background_battery_monitor is not None:
+            background_battery_monitor.stop()
         if wifi_monitor is not None:
             wifi_monitor.stop()
         runtime_state.update_component("server", running=False, ok=True, last_error=None)
@@ -729,10 +908,35 @@ def create_status_app(
     def get_battery() -> dict[str, Any]:
         logger.info("Request received: GET /battery")
         latest_session = find_latest_session_dir(project_root)
-        if latest_session is None:
-            return {"status": "no_session", "message": "no session directory found"}
+        if latest_session is not None:
+            battery_row = read_latest_battery_row(latest_session / "battery" / "battery_log.csv", logger)
+            if battery_row.get("status") not in {"no_file", "no_data"}:
+                classification = classify_battery_status(
+                    battery_row.get("voltage"),
+                    battery_row.get("current"),
+                    battery_row.get("battery_temp_c"),
+                    _recent_battery_rows(latest_session / "battery" / "battery_log.csv", logger),
+                )
+                return {**battery_row, **classification}
 
-        return read_latest_battery_row(latest_session / "battery" / "battery_log.csv", logger)
+        latest_battery = runtime_state.snapshot().get("latest_battery", {})
+        if latest_battery.get("unix_time") is None:
+            return {"status": "no_data", "message": "no battery data available"}
+
+        battery_payload = {
+            "voltage": latest_battery.get("voltage_v"),
+            "current": latest_battery.get("current_a"),
+            "percent": latest_battery.get("remaining_percent"),
+            "battery_temp_c": latest_battery.get("battery_temp_c"),
+            "last_updated": latest_battery.get("unix_time"),
+        }
+        classification = classify_battery_status(
+            battery_payload.get("voltage"),
+            battery_payload.get("current"),
+            battery_payload.get("battery_temp_c"),
+            runtime_state.battery_history(),
+        )
+        return {**battery_payload, **classification}
 
     @app.get("/sonar")
     def get_sonar() -> dict[str, Any]:

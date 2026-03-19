@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from collections import deque
 import shutil
 import threading
 from typing import Any
@@ -28,6 +29,7 @@ class BatteryState:
     voltage_v: float | None = None
     current_a: float | None = None
     remaining_percent: float | None = None
+    battery_temp_c: float | None = None
     low_warning: bool = False
 
 
@@ -45,6 +47,7 @@ class RuntimeState:
         self.network = ComponentState()
         self.server = ComponentState()
         self.latest_battery = BatteryState()
+        self._battery_history: deque[dict[str, float | None]] = deque(maxlen=10)
         self.network_connected: bool | None = None
         self.network_ssid: str | None = None
         self.power_warning: str | None = None
@@ -110,6 +113,7 @@ class RuntimeState:
         voltage_v: float | None,
         current_a: float | None,
         remaining_percent: float | None,
+        battery_temp_c: float | None,
         low_warning: bool,
     ) -> None:
         with self._lock:
@@ -119,9 +123,23 @@ class RuntimeState:
                 voltage_v=voltage_v,
                 current_a=current_a,
                 remaining_percent=remaining_percent,
+                battery_temp_c=battery_temp_c,
                 low_warning=low_warning,
             )
+            self._battery_history.append(
+                {
+                    "unix_time": unix_time,
+                    "voltage_v": voltage_v,
+                    "current_a": current_a,
+                    "remaining_percent": remaining_percent,
+                    "battery_temp_c": battery_temp_c,
+                }
+            )
             self.last_updated_at = _now_iso()
+
+    def battery_history(self) -> list[dict[str, float | None]]:
+        with self._lock:
+            return list(self._battery_history)
 
     def set_network_status(self, connected: bool | None, ssid: str | None, last_error: str | None = None) -> None:
         with self._lock:
