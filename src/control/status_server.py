@@ -17,6 +17,11 @@ from src.network.wifi_monitor import WifiMonitor
 from src.state.runtime_state import RuntimeState
 
 
+_THERMAL_ZONE_CACHE: dict[str, Path | None] | None = None
+_THERMAL_SOURCE_LOGGED = False
+_THERMAL_FAILURE_LOGGED = False
+
+
 class SessionStartRequest(BaseModel):
     session_name: Optional[str] = None
 
@@ -155,6 +160,102 @@ def read_sonar_status(csv_path: Path, logger: logging.Logger, sample_count: int 
     }
 
 
+def _find_thermal_zone_cache(logger: logging.Logger) -> dict[str, Path | None]:
+    global _THERMAL_ZONE_CACHE
+    global _THERMAL_SOURCE_LOGGED
+
+    if _THERMAL_ZONE_CACHE is not None:
+        return _THERMAL_ZONE_CACHE
+
+    zone_map: dict[str, Path | None] = {"cpu": None, "gpu": None, "board": None}
+    thermal_root = Path("/sys/class/thermal")
+
+    for zone_dir in sorted(thermal_root.glob("thermal_zone*")):
+        type_path = zone_dir / "type"
+        temp_path = zone_dir / "temp"
+        if not type_path.exists() or not temp_path.exists():
+            continue
+
+        try:
+            zone_type = type_path.read_text(encoding="utf-8").strip().lower()
+        except Exception:
+            continue
+
+        if zone_map["cpu"] is None and "cpu" in zone_type:
+            zone_map["cpu"] = temp_path
+        elif zone_map["gpu"] is None and "gpu" in zone_type:
+            zone_map["gpu"] = temp_path
+        elif zone_map["board"] is None and any(token in zone_type for token in ("board", "ao", "soc", "cv")):
+            zone_map["board"] = temp_path
+
+    _THERMAL_ZONE_CACHE = zone_map
+    if not _THERMAL_SOURCE_LOGGED:
+        logger.info(
+            "System thermal source detected. cpu=%s gpu=%s board=%s",
+            zone_map["cpu"],
+            zone_map["gpu"],
+            zone_map["board"],
+        )
+        _THERMAL_SOURCE_LOGGED = True
+    return zone_map
+
+
+def _read_temp_c(temp_path: Path | None) -> float | None:
+    if temp_path is None or not temp_path.exists():
+        return None
+
+    raw_value = temp_path.read_text(encoding="utf-8").strip()
+    value = float(raw_value)
+    if value > 1000:
+        value /= 1000.0
+    return round(value, 2)
+
+
+def read_system_status(logger: logging.Logger) -> dict[str, Any]:
+    global _THERMAL_FAILURE_LOGGED
+
+    try:
+        zone_map = _find_thermal_zone_cache(logger)
+        cpu_temp_c = _read_temp_c(zone_map["cpu"])
+        gpu_temp_c = _read_temp_c(zone_map["gpu"])
+        board_temp_c = _read_temp_c(zone_map["board"])
+        available_temps = [temp for temp in (cpu_temp_c, gpu_temp_c, board_temp_c) if temp is not None]
+
+        if not available_temps:
+            return {
+                "cpu_temp_c": None,
+                "gpu_temp_c": None,
+                "board_temp_c": None,
+                "status": "unknown",
+            }
+
+        max_temp = max(available_temps)
+        if max_temp < 70.0:
+            status = "normal"
+        elif max_temp < 80.0:
+            status = "warning"
+        else:
+            status = "hot"
+
+        _THERMAL_FAILURE_LOGGED = False
+        return {
+            "cpu_temp_c": cpu_temp_c,
+            "gpu_temp_c": gpu_temp_c,
+            "board_temp_c": board_temp_c,
+            "status": status,
+        }
+    except Exception as exc:
+        if not _THERMAL_FAILURE_LOGGED:
+            logger.warning("Failed to read Jetson thermal information: %s", exc)
+            _THERMAL_FAILURE_LOGGED = True
+        return {
+            "cpu_temp_c": None,
+            "gpu_temp_c": None,
+            "board_temp_c": None,
+            "status": "unknown",
+        }
+
+
 def resolve_last_error(snapshot: dict[str, Any]) -> str | None:
     for component_name in ("camera", "sonar", "battery", "network", "server"):
         component = snapshot.get(component_name, {})
@@ -261,6 +362,8 @@ def create_status_app(
       background: var(--bad);
     }
     .pill.ok { background: var(--ok); }
+    .pill.warn { background: #d97706; }
+    .pill.unknown { background: #6b7280; }
     .message {
       margin-top: 12px;
       min-height: 24px;
@@ -296,6 +399,13 @@ def create_status_app(
       <div class="status-row"><span class="label">sonar_variation</span><span class="value" id="sonar_variation">-</span></div>
       <div class="status-row"><span class="label">sonar_status</span><span class="value" id="sonar_status">-</span></div>
     </div>
+
+    <div class="card">
+      <div class="status-row"><span class="label">cpu_temp</span><span class="value" id="cpu_temp">-</span></div>
+      <div class="status-row"><span class="label">gpu_temp</span><span class="value" id="gpu_temp">-</span></div>
+      <div class="status-row"><span class="label">board_temp</span><span class="value" id="board_temp">-</span></div>
+      <div class="status-row"><span class="label">thermal_status</span><span class="value" id="thermal_status">-</span></div>
+    </div>
   </div>
 
   <script>
@@ -304,18 +414,16 @@ def create_status_app(
     }
 
     function setBool(id, value) {
-      const element = document.getElementById(id);
-      const active = Boolean(value);
-      element.innerHTML = '<span class="pill' + (active ? ' ok' : '') + '">' + (active ? 'true' : 'false') + '</span>';
+      setStatusPill(id, Boolean(value) ? 'true' : 'false', Boolean(value) ? 'ok' : 'bad');
     }
 
     function showMessage(text) {
       document.getElementById('message').textContent = text;
     }
 
-    function setStatusPill(id, text, ok) {
+    function setStatusPill(id, text, tone) {
       const element = document.getElementById(id);
-      element.innerHTML = '<span class="pill' + (ok ? ' ok' : '') + '">' + text + '</span>';
+      element.innerHTML = '<span class="pill ' + tone + '">' + text + '</span>';
     }
 
     async function fetchJson(url, options) {
@@ -325,10 +433,11 @@ def create_status_app(
 
     async function refreshStatus() {
       try {
-        const [health, battery, sonar] = await Promise.all([
+        const [health, battery, sonar, system] = await Promise.all([
           fetchJson('/health'),
           fetchJson('/battery'),
           fetchJson('/sonar'),
+          fetchJson('/system'),
         ]);
 
         setBool('session_active', health.session_active);
@@ -366,7 +475,27 @@ def create_status_app(
           setText('sonar_variation', '-');
         }
 
-        setStatusPill('sonar_status', sonar.status || 'no_data', Boolean(sonar.stable));
+        if (sonar.status === 'stable') {
+          setStatusPill('sonar_status', sonar.status, 'ok');
+        } else if (sonar.status === 'no_data') {
+          setStatusPill('sonar_status', sonar.status, 'unknown');
+        } else {
+          setStatusPill('sonar_status', sonar.status || 'unknown', 'bad');
+        }
+
+        setText('cpu_temp', system.cpu_temp_c != null ? Number(system.cpu_temp_c).toFixed(1) + ' C' : '-');
+        setText('gpu_temp', system.gpu_temp_c != null ? Number(system.gpu_temp_c).toFixed(1) + ' C' : '-');
+        setText('board_temp', system.board_temp_c != null ? Number(system.board_temp_c).toFixed(1) + ' C' : '-');
+
+        if (system.status === 'normal') {
+          setStatusPill('thermal_status', system.status, 'ok');
+        } else if (system.status === 'warning') {
+          setStatusPill('thermal_status', system.status, 'warn');
+        } else if (system.status === 'hot') {
+          setStatusPill('thermal_status', system.status, 'bad');
+        } else {
+          setStatusPill('thermal_status', system.status || 'unknown', 'unknown');
+        }
       } catch (error) {
         showMessage('Status update failed: ' + error);
       }
@@ -510,6 +639,11 @@ def create_status_app(
             }
 
         return read_sonar_status(latest_session / "sonar" / "sonar_log.csv", logger)
+
+    @app.get("/system")
+    def get_system() -> dict[str, Any]:
+        logger.info("Request received: GET /system")
+        return read_system_status(logger)
 
     @app.get("/health")
     def get_health() -> dict[str, Any]:

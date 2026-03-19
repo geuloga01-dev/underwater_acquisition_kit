@@ -174,6 +174,8 @@ Available endpoints:
   Returns whether a session is active, the active/latest session ID, and metadata from the latest session when available.
 - `GET /battery`
   Returns the latest battery values from `data/sessions/<latest_session>/battery/battery_log.csv`.
+- `GET /system`
+  Returns Jetson thermal information such as CPU/GPU temperature and an overall thermal status.
 - `GET /health`
   Returns a lightweight runtime view with session activity, camera/sonar/battery worker state, free disk space, Wi-Fi status, and last error if present.
 - `GET /session/current`
@@ -216,6 +218,17 @@ The latest battery state is also exposed through the runtime state object and th
 If battery voltage looks physically suspicious for this platform, the logger writes a warning but does not stop acquisition.
 
 If the battery listener fails, the failure is logged and camera/sonar acquisition can continue.
+
+## System Temperature
+
+The status server exposes `GET /system` and the phone dashboard now shows Jetson temperature.
+
+The current implementation reads Jetson thermal zones from `/sys/class/thermal` and reports:
+
+- `cpu_temp_c`
+- `gpu_temp_c`
+- optional `board_temp_c`
+- `status`: `normal`, `warning`, `hot`, or `unknown`
 
 ## Wi-Fi Auto Reconnect
 
