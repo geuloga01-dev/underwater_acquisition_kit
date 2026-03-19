@@ -6,7 +6,9 @@ import logging
 from pathlib import Path
 import shutil
 import statistics
+import subprocess
 from typing import Any, Optional
+import re
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -20,6 +22,8 @@ from src.state.runtime_state import RuntimeState
 _THERMAL_ZONE_CACHE: dict[str, Path | None] | None = None
 _THERMAL_SOURCE_LOGGED = False
 _THERMAL_FAILURE_LOGGED = False
+_TEGRSTATS_SOURCE_LOGGED = False
+_TEGRSTATS_FAILURE_LOGGED = False
 
 
 class SessionStartRequest(BaseModel):
@@ -160,6 +164,68 @@ def read_sonar_status(csv_path: Path, logger: logging.Logger, sample_count: int 
     }
 
 
+def _parse_tegrastats_metric(output: str, pattern: str) -> float | None:
+    match = re.search(pattern, output, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return round(float(match.group(1)), 2)
+    except ValueError:
+        return None
+
+
+def _read_tegrastats_status(logger: logging.Logger) -> dict[str, Any] | None:
+    global _TEGRSTATS_SOURCE_LOGGED
+    global _TEGRSTATS_FAILURE_LOGGED
+
+    try:
+        result = subprocess.run(
+            ["bash", "-lc", "tegrastats | head -n 1"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except Exception as exc:
+        if not _TEGRSTATS_FAILURE_LOGGED:
+            logger.warning("Failed to execute tegrastats: %s", exc)
+            _TEGRSTATS_FAILURE_LOGGED = True
+        return None
+
+    output = (result.stdout or "").strip()
+    if result.returncode != 0 or not output:
+        if not _TEGRSTATS_FAILURE_LOGGED:
+            logger.warning("tegrastats returned no usable output: %s", result.stderr.strip() or output)
+            _TEGRSTATS_FAILURE_LOGGED = True
+        return None
+
+    cpu_temp_c = _parse_tegrastats_metric(output, r"CPU@([0-9]+(?:\.[0-9]+)?)C")
+    gpu_temp_c = _parse_tegrastats_metric(output, r"GPU@([0-9]+(?:\.[0-9]+)?)C")
+    tj_temp_c = _parse_tegrastats_metric(output, r"tj@([0-9]+(?:\.[0-9]+)?)C")
+    board_temp_c = _parse_tegrastats_metric(output, r"(?:Tboard(?:_tegra)?|AO)@([0-9]+(?:\.[0-9]+)?)C")
+    power_mw = _parse_tegrastats_metric(output, r"VDD_IN\s+([0-9]+(?:\.[0-9]+)?)mW")
+
+    if all(value is None for value in (cpu_temp_c, gpu_temp_c, tj_temp_c, board_temp_c, power_mw)):
+        if not _TEGRSTATS_FAILURE_LOGGED:
+            logger.warning("tegrastats output did not match expected metrics: %s", output)
+            _TEGRSTATS_FAILURE_LOGGED = True
+        return None
+
+    if not _TEGRSTATS_SOURCE_LOGGED:
+        logger.info("System source detected: tegrastats")
+        _TEGRSTATS_SOURCE_LOGGED = True
+    _TEGRSTATS_FAILURE_LOGGED = False
+
+    return {
+        "cpu_temp_c": cpu_temp_c,
+        "gpu_temp_c": gpu_temp_c,
+        "tj_temp_c": tj_temp_c,
+        "board_temp_c": board_temp_c,
+        "power_in_w": round(power_mw / 1000.0, 3) if power_mw is not None else None,
+        "source": "tegrastats",
+    }
+
+
 def _find_thermal_zone_cache(logger: logging.Logger) -> dict[str, Path | None]:
     global _THERMAL_ZONE_CACHE
     global _THERMAL_SOURCE_LOGGED
@@ -215,6 +281,39 @@ def read_system_status(logger: logging.Logger) -> dict[str, Any]:
     global _THERMAL_FAILURE_LOGGED
 
     try:
+        tegrastats_status = _read_tegrastats_status(logger)
+        if tegrastats_status is not None:
+            available_temps = [
+                temp
+                for temp in (
+                    tegrastats_status.get("cpu_temp_c"),
+                    tegrastats_status.get("gpu_temp_c"),
+                    tegrastats_status.get("tj_temp_c"),
+                    tegrastats_status.get("board_temp_c"),
+                )
+                if temp is not None
+            ]
+            if available_temps:
+                max_temp = max(available_temps)
+                if max_temp < 70.0:
+                    status = "normal"
+                elif max_temp < 80.0:
+                    status = "warning"
+                else:
+                    status = "hot"
+            else:
+                status = "unknown"
+
+            return {
+                "cpu_temp_c": tegrastats_status.get("cpu_temp_c"),
+                "gpu_temp_c": tegrastats_status.get("gpu_temp_c"),
+                "tj_temp_c": tegrastats_status.get("tj_temp_c"),
+                "board_temp_c": tegrastats_status.get("board_temp_c"),
+                "power_in_w": tegrastats_status.get("power_in_w"),
+                "status": status,
+                "source": tegrastats_status.get("source"),
+            }
+
         zone_map = _find_thermal_zone_cache(logger)
         cpu_temp_c = _read_temp_c(zone_map["cpu"])
         gpu_temp_c = _read_temp_c(zone_map["gpu"])
@@ -225,8 +324,11 @@ def read_system_status(logger: logging.Logger) -> dict[str, Any]:
             return {
                 "cpu_temp_c": None,
                 "gpu_temp_c": None,
+                "tj_temp_c": None,
                 "board_temp_c": None,
+                "power_in_w": None,
                 "status": "unknown",
+                "source": "unknown",
             }
 
         max_temp = max(available_temps)
@@ -241,8 +343,11 @@ def read_system_status(logger: logging.Logger) -> dict[str, Any]:
         return {
             "cpu_temp_c": cpu_temp_c,
             "gpu_temp_c": gpu_temp_c,
+            "tj_temp_c": None,
             "board_temp_c": board_temp_c,
+            "power_in_w": None,
             "status": status,
+            "source": "thermal_zone",
         }
     except Exception as exc:
         if not _THERMAL_FAILURE_LOGGED:
@@ -251,8 +356,11 @@ def read_system_status(logger: logging.Logger) -> dict[str, Any]:
         return {
             "cpu_temp_c": None,
             "gpu_temp_c": None,
+            "tj_temp_c": None,
             "board_temp_c": None,
+            "power_in_w": None,
             "status": "unknown",
+            "source": "unknown",
         }
 
 
@@ -403,7 +511,9 @@ def create_status_app(
     <div class="card">
       <div class="status-row"><span class="label">cpu_temp</span><span class="value" id="cpu_temp">-</span></div>
       <div class="status-row"><span class="label">gpu_temp</span><span class="value" id="gpu_temp">-</span></div>
+      <div class="status-row"><span class="label">tj_temp</span><span class="value" id="tj_temp">-</span></div>
       <div class="status-row"><span class="label">board_temp</span><span class="value" id="board_temp">-</span></div>
+      <div class="status-row"><span class="label">vdd_in_power</span><span class="value" id="vdd_in_power">-</span></div>
       <div class="status-row"><span class="label">thermal_status</span><span class="value" id="thermal_status">-</span></div>
     </div>
   </div>
@@ -485,7 +595,9 @@ def create_status_app(
 
         setText('cpu_temp', system.cpu_temp_c != null ? Number(system.cpu_temp_c).toFixed(1) + ' C' : '-');
         setText('gpu_temp', system.gpu_temp_c != null ? Number(system.gpu_temp_c).toFixed(1) + ' C' : '-');
+        setText('tj_temp', system.tj_temp_c != null ? Number(system.tj_temp_c).toFixed(1) + ' C' : '-');
         setText('board_temp', system.board_temp_c != null ? Number(system.board_temp_c).toFixed(1) + ' C' : '-');
+        setText('vdd_in_power', system.power_in_w != null ? Number(system.power_in_w).toFixed(2) + ' W' : '-');
 
         if (system.status === 'normal') {
           setStatusPill('thermal_status', system.status, 'ok');

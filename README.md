@@ -227,8 +227,12 @@ The current implementation reads Jetson thermal zones from `/sys/class/thermal` 
 
 - `cpu_temp_c`
 - `gpu_temp_c`
+- `tj_temp_c`
 - optional `board_temp_c`
+- optional `power_in_w` from `tegrastats` when available
 - `status`: `normal`, `warning`, `hot`, or `unknown`
+
+The server now prefers `tegrastats` when available and falls back to `/sys/class/thermal` if needed.
 
 ## Wi-Fi Auto Reconnect
 
