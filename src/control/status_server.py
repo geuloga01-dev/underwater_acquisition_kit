@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 import shutil
+import statistics
 from typing import Any, Optional
 
 from fastapi import FastAPI
@@ -71,6 +72,86 @@ def read_latest_battery_row(csv_path: Path, logger: logging.Logger) -> dict[str,
         "voltage": _as_float(latest.get("voltage_v")),
         "current": _as_float(latest.get("current_a")),
         "percent": _as_float(latest.get("remaining_percent")),
+    }
+
+
+def read_sonar_status(csv_path: Path, logger: logging.Logger, sample_count: int = 10) -> dict[str, Any]:
+    if not csv_path.exists():
+        return {
+            "distance_mm": None,
+            "distance_m": None,
+            "confidence": None,
+            "sample_count_used": 0,
+            "variation_mm": None,
+            "stable": False,
+            "status": "no_data",
+            "last_updated": None,
+        }
+
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+    except Exception as exc:
+        logger.warning("Failed to read sonar log %s: %s", csv_path, exc)
+        return {
+            "distance_mm": None,
+            "distance_m": None,
+            "confidence": None,
+            "sample_count_used": 0,
+            "variation_mm": None,
+            "stable": False,
+            "status": "no_data",
+            "last_updated": None,
+        }
+
+    valid_rows = [
+        row
+        for row in rows
+        if _as_float(row.get("timestamp")) is not None and _as_float(row.get("distance_mm")) is not None
+    ]
+    if not valid_rows:
+        return {
+            "distance_mm": None,
+            "distance_m": None,
+            "confidence": None,
+            "sample_count_used": 0,
+            "variation_mm": None,
+            "stable": False,
+            "status": "no_data",
+            "last_updated": None,
+        }
+
+    recent_rows = valid_rows[-sample_count:]
+    distances = [int(_as_float(row.get("distance_mm")) or 0) for row in recent_rows]
+    confidences = [
+        _as_float(row.get("confidence"))
+        for row in recent_rows
+        if _as_float(row.get("confidence")) is not None
+    ]
+    latest_row = recent_rows[-1]
+    latest_distance_mm = distances[-1]
+    latest_confidence = _as_float(latest_row.get("confidence"))
+    average_confidence = statistics.mean(confidences) if confidences else None
+    variation_mm = max(distances) - min(distances) if len(distances) >= 2 else 0.0
+    status = "stable"
+    stable = True
+
+    if average_confidence is None or average_confidence < 70:
+        status = "weak_signal"
+        stable = False
+    elif variation_mm > 80:
+        status = "unstable"
+        stable = False
+
+    return {
+        "distance_mm": latest_distance_mm,
+        "distance_m": round(latest_distance_mm / 1000.0, 3),
+        "confidence": latest_confidence,
+        "sample_count_used": len(recent_rows),
+        "variation_mm": round(float(variation_mm), 2),
+        "stable": stable,
+        "status": status,
+        "last_updated": _as_float(latest_row.get("timestamp")),
     }
 
 
@@ -208,6 +289,13 @@ def create_status_app(
       <div class="status-row"><span class="label">camera_running</span><span class="value" id="camera_running">-</span></div>
       <div class="status-row"><span class="label">sonar_running</span><span class="value" id="sonar_running">-</span></div>
     </div>
+
+    <div class="card">
+      <div class="status-row"><span class="label">sonar_distance</span><span class="value" id="sonar_distance">-</span></div>
+      <div class="status-row"><span class="label">sonar_confidence</span><span class="value" id="sonar_confidence">-</span></div>
+      <div class="status-row"><span class="label">sonar_variation</span><span class="value" id="sonar_variation">-</span></div>
+      <div class="status-row"><span class="label">sonar_status</span><span class="value" id="sonar_status">-</span></div>
+    </div>
   </div>
 
   <script>
@@ -225,6 +313,11 @@ def create_status_app(
       document.getElementById('message').textContent = text;
     }
 
+    function setStatusPill(id, text, ok) {
+      const element = document.getElementById(id);
+      element.innerHTML = '<span class="pill' + (ok ? ' ok' : '') + '">' + text + '</span>';
+    }
+
     async function fetchJson(url, options) {
       const response = await fetch(url, options);
       return await response.json();
@@ -232,9 +325,10 @@ def create_status_app(
 
     async function refreshStatus() {
       try {
-        const [health, battery] = await Promise.all([
+        const [health, battery, sonar] = await Promise.all([
           fetchJson('/health'),
           fetchJson('/battery'),
+          fetchJson('/sonar'),
         ]);
 
         setBool('session_active', health.session_active);
@@ -253,6 +347,26 @@ def create_status_app(
         } else {
           setText('battery_percent', battery.status || '-');
         }
+
+        if (sonar && sonar.distance_m != null) {
+          setText('sonar_distance', Number(sonar.distance_m).toFixed(3) + ' m');
+        } else {
+          setText('sonar_distance', sonar.status || '-');
+        }
+
+        if (sonar && sonar.confidence != null) {
+          setText('sonar_confidence', Number(sonar.confidence).toFixed(1));
+        } else {
+          setText('sonar_confidence', '-');
+        }
+
+        if (sonar && sonar.variation_mm != null) {
+          setText('sonar_variation', Number(sonar.variation_mm).toFixed(1) + ' mm');
+        } else {
+          setText('sonar_variation', '-');
+        }
+
+        setStatusPill('sonar_status', sonar.status || 'no_data', Boolean(sonar.stable));
       } catch (error) {
         showMessage('Status update failed: ' + error);
       }
@@ -378,6 +492,24 @@ def create_status_app(
             return {"status": "no_session", "message": "no session directory found"}
 
         return read_latest_battery_row(latest_session / "battery" / "battery_log.csv", logger)
+
+    @app.get("/sonar")
+    def get_sonar() -> dict[str, Any]:
+        logger.info("Request received: GET /sonar")
+        latest_session = find_latest_session_dir(project_root)
+        if latest_session is None:
+            return {
+                "distance_mm": None,
+                "distance_m": None,
+                "confidence": None,
+                "sample_count_used": 0,
+                "variation_mm": None,
+                "stable": False,
+                "status": "no_data",
+                "last_updated": None,
+            }
+
+        return read_sonar_status(latest_session / "sonar" / "sonar_log.csv", logger)
 
     @app.get("/health")
     def get_health() -> dict[str, Any]:
