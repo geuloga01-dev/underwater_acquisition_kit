@@ -18,6 +18,7 @@ underwater_acquisition_kit/
 |  |- camera_record.py
 |  |- sonar_logger.py
 |  |- sonar_quick_test.py
+|  |- live_sensor_check.py
 |  |- run_session.py
 |  `- status_server.py
 |- configs/
@@ -146,6 +147,14 @@ Run a full local session on Jetson:
 ```bash
 python3 apps/run_session.py
 ```
+
+Quick live sanity check before a full session:
+
+```bash
+python3 apps/live_sensor_check.py
+```
+
+This prints live sonar, battery, and ATTITUDE values so you can physically move the setup and confirm the numbers change in a meaningful way before recording a session.
 
 What it does:
 
