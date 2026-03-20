@@ -164,6 +164,7 @@ class SessionController:
 
             video_path = session_paths.video / f"camera_record.{recording_config.container}"
             sonar_csv_path = session_paths.sonar / "sonar_log.csv"
+            sonar_profile_path = session_paths.sonar / "sonar_profile.jsonl"
             battery_csv_path = session_paths.battery / "battery_log.csv"
             session_start_time = time.time()
             active_camera = False
@@ -200,7 +201,7 @@ class SessionController:
             if active_sonar:
                 sonar_thread = threading.Thread(
                     target=self._run_sonar_worker,
-                    args=(sonar_raw, sonar_csv_path, logger, stop_event, sonar_ready, sonar_errors),
+                    args=(sonar_raw, sonar_csv_path, sonar_profile_path, logger, stop_event, sonar_ready, sonar_errors),
                     name="sonar-worker",
                     daemon=True,
                 )
@@ -324,6 +325,7 @@ class SessionController:
         self,
         sonar_raw: dict[str, Any],
         csv_path: Path,
+        profile_path: Path,
         logger: logging.Logger,
         stop_event: threading.Event,
         ready_event: threading.Event,
@@ -336,13 +338,27 @@ class SessionController:
             first_record = prepare_sonar(client)
             self.runtime_state.update_component("sonar", ready=True, running=True, ok=True, last_error=None)
             logger.info(
-                "Sonar worker ready. first_distance_mm=%s first_confidence=%s",
+                "Sonar worker ready. first_distance_mm=%s first_confidence=%s profile_logging_enabled=%s profile_path=%s",
                 first_record.distance_mm,
                 first_record.confidence,
+                bool(sonar_config.profile_save and sonar_config.profile_read_enabled),
+                profile_path,
             )
             ready_event.set()
-            sample_count = log_sonar_stream(client, sonar_config, logger, csv_path=csv_path, stop_event=stop_event)
-            logger.info("Sonar worker stopped. samples=%d output=%s", sample_count, csv_path)
+            sample_count = log_sonar_stream(
+                client,
+                sonar_config,
+                logger,
+                csv_path=csv_path,
+                profile_path=profile_path,
+                stop_event=stop_event,
+            )
+            logger.info(
+                "Sonar worker stopped. samples=%d csv_output=%s profile_output=%s",
+                sample_count,
+                csv_path,
+                profile_path,
+            )
         except Exception as exc:
             error_list.append(exc)
             self.runtime_state.update_component("sonar", running=False, ok=False, last_error=str(exc))

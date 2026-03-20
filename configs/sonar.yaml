@@ -4,6 +4,17 @@ sonar:
   sample_interval: 0.2
   csv_save: true
   csv_path:
+  profile_save: true
+  profile_path:
+  profile_read_enabled: true
+  profile_batch_size: 16
+  profile_queue_size: 128
+  profile_flush_interval_seconds: 1.0
+  scan_start_mm:
+  scan_length_mm:
+  gain_setting:
+  mode_auto:
+  transmit_duration_us:
   telemetry_enabled: false
 
 logging:

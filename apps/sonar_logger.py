@@ -37,17 +37,21 @@ def main() -> int:
 
         sonar_config = load_sonar_config(raw_config)
         csv_path = Path(sonar_config.csv_path) if sonar_config.csv_path else PROJECT_ROOT / "data" / "sonar_log.csv"
+        profile_path = (
+            Path(sonar_config.profile_path) if sonar_config.profile_path else PROJECT_ROOT / "data" / "sonar_profile.jsonl"
+        )
 
         client = PingSonarClient(sonar_config, logger=logger)
         first_record = prepare_sonar(client)
         logger.info(
-            "Sonar ready after validation. first_distance_mm=%s first_confidence=%s",
+            "Sonar ready after validation. first_distance_mm=%s first_confidence=%s profile_logging_enabled=%s",
             first_record.distance_mm,
             first_record.confidence,
+            bool(sonar_config.profile_save and sonar_config.profile_read_enabled),
         )
-        sample_count = log_sonar_stream(client, sonar_config, logger, csv_path=csv_path)
+        sample_count = log_sonar_stream(client, sonar_config, logger, csv_path=csv_path, profile_path=profile_path)
 
-        logger.info("Sonar logging finished. samples=%d csv_path=%s", sample_count, csv_path)
+        logger.info("Sonar logging finished. samples=%d csv_path=%s profile_path=%s", sample_count, csv_path, profile_path)
         return 0
     except FileNotFoundError:
         logger.exception("Sonar config file not found: %s", config_path)

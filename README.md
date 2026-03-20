@@ -74,6 +74,7 @@ Typical outputs:
 - `video/camera_record.<container>`
 - `timestamps/frame_timestamps.csv`
 - `sonar/sonar_log.csv`
+- `sonar/sonar_profile.jsonl`
 - `battery/battery_log.csv`
 - `meta/session_metadata.json`
 - `logs/run_session.log`
@@ -89,6 +90,8 @@ Typical outputs:
 
 - Ping Sonar serial port and baudrate
 - Sample interval, CSV output, telemetry hook flags
+- Optional profile logging and fixed scan settings such as `scan_start_mm`, `scan_length_mm`, `gain_setting`, `mode_auto`, and `transmit_duration_us`
+- Buffered profile writer settings such as `profile_batch_size`, `profile_queue_size`, and `profile_flush_interval_seconds`
 
 ### `configs/battery.yaml`
 
@@ -141,6 +144,8 @@ What it does:
 - creates a new session folder
 - prepares sonar if available
 - starts sonar logging when available
+- writes expanded sonar metadata to `sonar/sonar_log.csv`
+- writes `sonar/sonar_profile.jsonl` when profile reads are supported
 - starts battery logging when available
 - opens camera and records locally
 - writes metadata and logs
@@ -158,6 +163,30 @@ What it does:
   - `sonar: true/false`
   - `battery: true/false`
 - Session metadata also records camera runtime details such as whether recording actually started and how many frames were written.
+
+## Sonar Profile Logging
+
+The sonar acquisition layer now keeps the original CSV path simple while extending it with more Ping metadata:
+
+- `timestamp`
+- `distance_mm`
+- `confidence`
+- `scan_start_mm`
+- `scan_length_mm`
+- `gain_setting`
+- `mode_auto`
+- `transmit_duration_us`
+- `ping_number`
+
+When the current Ping firmware / `brping` path supports profile reads, the logger also writes:
+
+- `sonar/sonar_profile.jsonl`
+
+Each line contains one ping record with the fields above plus `profile_data`.
+
+To keep session load low on Jetson, profile JSONL is written through a lightweight queue-based background writer. The sonar read loop only enqueues profile payloads, and the writer thread flushes them in batches.
+
+If profile reads are unsupported or fail, CSV logging continues and profile JSONL is skipped without stopping the session.
 
 ## Running Status Server
 
