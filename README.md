@@ -24,6 +24,7 @@ underwater_acquisition_kit/
 |  |- camera.yaml
 |  |- sonar.yaml
 |  |- battery.yaml
+|  |- imu.yaml
 |  |- network.yaml
 |  |- system.yaml
 |  `- server.yaml
@@ -64,6 +65,7 @@ data/sessions/<session_id>/
 |- video/
 |- timestamps/
 |- sonar/
+|- imu/
 |- battery/
 |- logs/
 `- meta/
@@ -75,6 +77,7 @@ Typical outputs:
 - `timestamps/frame_timestamps.csv`
 - `sonar/sonar_log.csv`
 - `sonar/sonar_profile.jsonl`
+- `imu/attitude_log.csv`
 - `battery/battery_log.csv`
 - `meta/session_metadata.json`
 - `logs/run_session.log`
@@ -92,12 +95,17 @@ Typical outputs:
 - Sample interval, CSV output, telemetry hook flags
 - Optional profile logging and fixed scan settings such as `scan_start_mm`, `scan_length_mm`, `gain_setting`, `mode_auto`, and `transmit_duration_us`
 - Buffered profile writer settings such as `profile_batch_size`, `profile_queue_size`, and `profile_flush_interval_seconds`
+- Sonar metadata placeholders such as `beam_angle_deg` and `camera_sonar_relative_pose`
 
 ### `configs/battery.yaml`
 
 - Pixhawk MAVLink port and baudrate
 - Battery poll interval
 - CSV output and low-battery threshold
+
+### `configs/imu.yaml`
+
+- ATTITUDE CSV logging toggle and timeout for the shared Pixhawk MAVLink worker
 
 ### `configs/network.yaml`
 
@@ -146,7 +154,7 @@ What it does:
 - starts sonar logging when available
 - writes expanded sonar metadata to `sonar/sonar_log.csv`
 - writes `sonar/sonar_profile.jsonl` when profile reads are supported
-- starts battery logging when available
+- starts shared Pixhawk battery + ATTITUDE logging when available
 - opens camera and records locally
 - writes metadata and logs
 - continues locally even if Wi-Fi reconnect fails
@@ -157,12 +165,14 @@ What it does:
 
 - Camera is the critical subsystem for the current MVP. If camera initialization fails, the session fails clearly.
 - Sonar is optional. If sonar is disconnected or initialization fails, the session logs a warning, marks sonar unavailable, and continues with camera-only or camera+battery capture.
-- Battery logging is optional. If the MAVLink battery listener fails, the session logs a warning and continues as long as camera recording is working.
+- Battery and ATTITUDE logging are optional. If the shared Pixhawk MAVLink worker fails, the session logs a warning and continues as long as camera recording is working.
 - Session metadata records which subsystems were active for that run:
   - `camera: true/false`
   - `sonar: true/false`
   - `battery: true/false`
+  - `imu: true/false`
 - Session metadata also records camera runtime details such as whether recording actually started and how many frames were written.
+- Session metadata also includes camera intrinsics, sonar beam angle, and a camera-sonar relative pose placeholder.
 
 ## Sonar Profile Logging
 
@@ -187,6 +197,21 @@ Each line contains one ping record with the fields above plus `profile_data`.
 To keep session load low on Jetson, profile JSONL is written through a lightweight queue-based background writer. The sonar read loop only enqueues profile payloads, and the writer thread flushes them in batches.
 
 If profile reads are unsupported or fail, CSV logging continues and profile JSONL is skipped without stopping the session.
+
+## Pixhawk Attitude Logging
+
+The shared Pixhawk MAVLink worker also listens for `ATTITUDE` and writes:
+
+- `imu/attitude_log.csv`
+
+Logged fields:
+
+- `timestamp`
+- `roll`
+- `pitch`
+- `yaw`
+
+Battery and attitude logs share the same MAVLink connection during a session so the Jetson does not open the same Pixhawk serial port twice.
 
 ## Running Status Server
 

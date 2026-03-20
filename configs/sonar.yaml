@@ -15,6 +15,14 @@ sonar:
   gain_setting:
   mode_auto:
   transmit_duration_us:
+  beam_angle_deg:
+  camera_sonar_relative_pose:
+    x_m:
+    y_m:
+    z_m:
+    roll_deg:
+    pitch_deg:
+    yaw_deg:
   telemetry_enabled: false
 
 logging:

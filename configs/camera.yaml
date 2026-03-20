@@ -11,6 +11,15 @@ camera:
   warmup_frames: 20
   window_name: "Underwater Acquisition Kit - Camera Test"
 
+calibration:
+  intrinsics:
+    model: "pinhole"
+    fx:
+    fy:
+    cx:
+    cy:
+    distortion_coeffs: []
+
 logging:
   level: INFO
 

@@ -14,7 +14,8 @@ from src.camera.webcam import WebcamCapture, load_camera_config
 from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream, prepare_sonar
 from src.state.runtime_state import RuntimeState
 from src.system.power_manager import JetsonPowerManager
-from src.telemetry.battery_listener import BatteryListener, load_battery_config, run_battery_logging_loop
+from src.telemetry.battery_listener import append_battery_csv, load_battery_config, normalize_battery_message
+from src.telemetry.attitude_listener import append_attitude_csv, load_attitude_config, normalize_attitude_message
 from src.utils.logger import get_app_logger
 from src.utils.session import create_session_dirs, save_metadata, session_paths_to_dict
 
@@ -127,19 +128,20 @@ class SessionController:
             session_paths.logs,
             log_filename="run_session.log",
         )
-        battery_thread: threading.Thread | None = None
+        pixhawk_thread: threading.Thread | None = None
         sonar_thread: threading.Thread | None = None
-        battery_errors: list[BaseException] = []
+        pixhawk_errors: list[BaseException] = []
         sonar_errors: list[BaseException] = []
-        battery_ready = threading.Event()
+        pixhawk_ready = threading.Event()
         sonar_ready = threading.Event()
 
         try:
             camera_raw = load_yaml_config(self.project_root / "configs" / "camera.yaml")
             sonar_raw = load_yaml_config(self.project_root / "configs" / "sonar.yaml")
             battery_raw = load_yaml_config(self.project_root / "configs" / "battery.yaml")
+            imu_raw = load_yaml_config(self.project_root / "configs" / "imu.yaml")
 
-            level = resolve_log_level(camera_raw, sonar_raw, battery_raw)
+            level = resolve_log_level(camera_raw, sonar_raw, battery_raw, imu_raw)
             logger.setLevel(level)
             for handler in logger.handlers:
                 handler.setLevel(level)
@@ -147,6 +149,7 @@ class SessionController:
             camera_config = load_camera_config(camera_raw)
             sonar_config = load_sonar_config(sonar_raw)
             battery_config = load_battery_config(battery_raw)
+            attitude_config = load_attitude_config(imu_raw)
             recording_config = load_recording_config(camera_raw)
             preview_enabled, preview_source = resolve_preview_setting(camera_raw, camera_config, recording_config)
 
@@ -161,21 +164,25 @@ class SessionController:
             self.runtime_state.update_component("camera", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("sonar", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("battery", ready=False, running=False, ok=False, last_error=None)
+            self.runtime_state.update_component("imu", ready=False, running=False, ok=False, last_error=None)
 
             video_path = session_paths.video / f"camera_record.{recording_config.container}"
             sonar_csv_path = session_paths.sonar / "sonar_log.csv"
             sonar_profile_path = session_paths.sonar / "sonar_profile.jsonl"
             battery_csv_path = session_paths.battery / "battery_log.csv"
+            attitude_csv_path = session_paths.imu / "attitude_log.csv"
             session_start_time = time.time()
             active_camera = False
             active_sonar = False
             active_battery = False
+            active_imu = False
 
             logger.info("Session created: %s", session_paths.root)
             logger.info("Preview resolved from %s: %s", preview_source, preview_enabled)
             logger.info("Acquisition is network-independent. Local recording continues without remote connectivity.")
             logger.info("Sonar port prepared: %s", sonar_config.port)
             logger.info("Battery port prepared: %s", battery_config.port)
+            logger.info("ATTITUDE logging prepared via shared Pixhawk MAVLink connection.")
 
             try:
                 self._prepare_sonar(sonar_raw, logger)
@@ -190,13 +197,13 @@ class SessionController:
                 logger.info("Waiting 1.0 second after sonar preparation before camera open.")
                 time.sleep(1.0)
 
-            battery_thread = threading.Thread(
-                target=self._run_battery_worker,
-                args=(battery_raw, battery_csv_path, logger, stop_event, battery_ready, battery_errors),
-                name="battery-worker",
+            pixhawk_thread = threading.Thread(
+                target=self._run_pixhawk_worker,
+                args=(battery_raw, imu_raw, battery_csv_path, attitude_csv_path, logger, stop_event, pixhawk_ready, pixhawk_errors),
+                name="pixhawk-worker",
                 daemon=True,
             )
-            battery_thread.start()
+            pixhawk_thread.start()
 
             if active_sonar:
                 sonar_thread = threading.Thread(
@@ -225,15 +232,17 @@ class SessionController:
                     time.sleep(0.1)
 
             for _ in range(20):
-                if battery_ready.is_set():
+                if pixhawk_ready.is_set():
                     active_battery = True
+                    active_imu = True
                     break
-                if battery_errors:
+                if pixhawk_errors:
                     logger.warning(
-                        "Battery listener unavailable for this session. Continuing without battery logging: %s",
-                        battery_errors[0],
+                        "Pixhawk telemetry unavailable for this session. Continuing without battery/imu logging: %s",
+                        pixhawk_errors[0],
                     )
                     active_battery = False
+                    active_imu = False
                     self.runtime_state.update_component(
                         "battery",
                         ready=False,
@@ -241,8 +250,15 @@ class SessionController:
                         ok=False,
                         last_error="unavailable",
                     )
+                    self.runtime_state.update_component(
+                        "imu",
+                        ready=False,
+                        running=False,
+                        ok=False,
+                        last_error="unavailable",
+                    )
                     break
-                if battery_thread is None or not battery_thread.is_alive():
+                if pixhawk_thread is None or not pixhawk_thread.is_alive():
                     break
                 time.sleep(0.1)
 
@@ -254,6 +270,8 @@ class SessionController:
                 active_sensors.append("sonar")
             if active_battery:
                 active_sensors.append("battery")
+            if active_imu:
+                active_sensors.append("imu")
             metadata_path = save_metadata(
                 session_paths.meta / "session_metadata.json",
                 {
@@ -267,10 +285,24 @@ class SessionController:
                     "recording": camera_raw.get("recording", {}),
                     "sonar": sonar_raw.get("sonar", {}),
                     "battery": battery_raw.get("battery", {}),
+                    "imu": imu_raw.get("imu", {}),
+                    "camera_intrinsics": camera_raw.get("calibration", {}).get("intrinsics", {}),
+                    "sonar_beam_angle_deg": sonar_raw.get("sonar", {}).get("beam_angle_deg"),
+                    "camera_sonar_relative_pose": sonar_raw.get("sonar", {}).get("camera_sonar_relative_pose", {}),
                     "active_subsystems": {
                         "camera": active_camera,
                         "sonar": active_sonar,
                         "battery": active_battery,
+                        "imu": active_imu,
+                    },
+                    "file_paths": {
+                        "video": str(video_path),
+                        "frame_timestamps": str(session_paths.timestamps / "frame_timestamps.csv"),
+                        "sonar_csv": str(sonar_csv_path),
+                        "sonar_profile_jsonl": str(sonar_profile_path),
+                        "battery_csv": str(battery_csv_path),
+                        "attitude_csv": str(attitude_csv_path),
+                        "log": str(session_paths.logs / "run_session.log"),
                     },
                     "camera_runtime": camera_result,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -281,11 +313,11 @@ class SessionController:
             stop_event.set()
             if sonar_thread is not None:
                 sonar_thread.join(timeout=5.0)
-            if battery_thread is not None:
-                battery_thread.join(timeout=5.0)
+            if pixhawk_thread is not None:
+                pixhawk_thread.join(timeout=5.0)
 
-            if battery_errors:
-                logger.warning("Battery logging ended with error but acquisition continued: %s", battery_errors[0])
+            if pixhawk_errors:
+                logger.warning("Pixhawk telemetry logging ended with error but acquisition continued: %s", pixhawk_errors[0])
             if sonar_errors:
                 logger.warning("Sonar logging ended with error but acquisition continued: %s", sonar_errors[0])
         except Exception as exc:
@@ -295,6 +327,7 @@ class SessionController:
             self.runtime_state.update_component("camera", running=False, ready=self.runtime_state.camera.ready, ok=self.runtime_state.camera.ok)
             self.runtime_state.update_component("sonar", running=False, ready=self.runtime_state.sonar.ready, ok=self.runtime_state.sonar.ok)
             self.runtime_state.update_component("battery", running=False, ready=self.runtime_state.battery.ready, ok=self.runtime_state.battery.ok)
+            self.runtime_state.update_component("imu", running=False, ready=self.runtime_state.imu.ready, ok=self.runtime_state.imu.ok)
             self.runtime_state.set_session(None, running=False, stop_requested=False)
             with self._lock:
                 self._thread = None
@@ -367,31 +400,113 @@ class SessionController:
             if client is not None:
                 client.close()
 
-    def _run_battery_worker(
+    def _run_pixhawk_worker(
         self,
         battery_raw: dict[str, Any],
-        csv_path: Path,
+        imu_raw: dict[str, Any],
+        battery_csv_path: Path,
+        attitude_csv_path: Path,
         logger: logging.Logger,
         stop_event: threading.Event,
         ready_event: threading.Event,
         error_list: list[BaseException],
     ) -> None:
-        listener: BatteryListener | None = None
+        connection = None
+        battery_samples = 0
+        attitude_samples = 0
         try:
+            try:
+                from pymavlink import mavutil
+            except ModuleNotFoundError as exc:
+                raise RuntimeError("pymavlink is not installed. Install it on Jetson for Pixhawk battery/imu logging.") from exc
+
             battery_config = load_battery_config(battery_raw)
-            listener = BatteryListener(battery_config, logger=logger)
-            listener.connect()
+            attitude_config = load_attitude_config(imu_raw)
+            connection = mavutil.mavlink_connection(battery_config.port, baud=battery_config.baudrate)
+            logger.info(
+                "Pixhawk MAVLink connection opened for battery+imu. port=%s baudrate=%s",
+                battery_config.port,
+                battery_config.baudrate,
+            )
+            if battery_config.wait_heartbeat:
+                logger.info("Waiting for MAVLink heartbeat. timeout=%.1fs", battery_config.heartbeat_timeout)
+                connection.wait_heartbeat(timeout=battery_config.heartbeat_timeout)
+                logger.info("MAVLink heartbeat received.")
+
             self.runtime_state.update_component("battery", ready=True, running=True, ok=True, last_error=None)
+            self.runtime_state.update_component("imu", ready=True, running=True, ok=True, last_error=None)
             ready_event.set()
-            sample_count = run_battery_logging_loop(listener, battery_config, logger, self.runtime_state, csv_path, stop_event)
-            logger.info("Battery worker stopped. samples=%d output=%s", sample_count, csv_path)
+
+            timeout_seconds = max(battery_config.poll_interval, attitude_config.timeout_seconds)
+            logger.info(
+                "Pixhawk telemetry logging loop started. battery_csv=%s attitude_csv=%s",
+                battery_csv_path,
+                attitude_csv_path,
+            )
+
+            while not stop_event.is_set():
+                message = connection.recv_match(type=["BATTERY_STATUS", "ATTITUDE"], blocking=True, timeout=timeout_seconds)
+                if message is None:
+                    continue
+
+                message_type = message.get_type()
+                if message_type == "BATTERY_STATUS":
+                    record = normalize_battery_message(message)
+                    low_warning = (
+                        record.remaining_percent is not None
+                        and record.remaining_percent <= battery_config.low_remaining_threshold
+                    )
+                    self.runtime_state.set_battery_state(
+                        timestamp_iso=record.timestamp_iso,
+                        unix_time=record.unix_time,
+                        voltage_v=record.voltage_v,
+                        current_a=record.current_a,
+                        remaining_percent=record.remaining_percent,
+                        battery_temp_c=record.battery_temp_c,
+                        low_warning=low_warning,
+                    )
+                    if battery_config.csv_save:
+                        try:
+                            append_battery_csv(battery_csv_path, record)
+                        except Exception as exc:
+                            logger.warning("Battery CSV append failed but acquisition will continue: %s", exc)
+                    battery_samples += 1
+                elif message_type == "ATTITUDE":
+                    record = normalize_attitude_message(message, time.time())
+                    self.runtime_state.set_attitude_state(
+                        timestamp_iso=record.timestamp_iso,
+                        unix_time=record.unix_time,
+                        roll=record.roll,
+                        pitch=record.pitch,
+                        yaw=record.yaw,
+                    )
+                    if attitude_config.csv_save:
+                        try:
+                            append_attitude_csv(attitude_csv_path, record)
+                        except Exception as exc:
+                            logger.warning("Attitude CSV append failed but acquisition will continue: %s", exc)
+                    attitude_samples += 1
+
+            logger.info(
+                "Pixhawk telemetry worker stopped. battery_samples=%d attitude_samples=%d battery_output=%s attitude_output=%s",
+                battery_samples,
+                attitude_samples,
+                battery_csv_path,
+                attitude_csv_path,
+            )
         except Exception as exc:
             error_list.append(exc)
             self.runtime_state.update_component("battery", running=False, ok=False, last_error=str(exc))
-            logger.warning("Battery worker failed: %s", exc)
+            self.runtime_state.update_component("imu", running=False, ok=False, last_error=str(exc))
+            logger.warning("Pixhawk telemetry worker failed: %s", exc)
         finally:
-            if listener is not None:
-                listener.close()
+            if connection is not None:
+                close_method = getattr(connection, "close", None)
+                if callable(close_method):
+                    try:
+                        close_method()
+                    except Exception:
+                        pass
 
     def _run_camera_loop(
         self,

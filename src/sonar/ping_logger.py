@@ -23,6 +23,7 @@ _CSV_FIELDNAMES = [
     "timestamp",
     "distance_mm",
     "confidence",
+    "valid",
     "scan_start_mm",
     "scan_length_mm",
     "gain_setting",
@@ -58,6 +59,7 @@ class SonarRecord:
     timestamp: float
     distance_mm: int | None
     confidence: int | None
+    valid: bool | None = None
     scan_start_mm: int | None = None
     scan_length_mm: int | None = None
     gain_setting: int | None = None
@@ -465,6 +467,7 @@ def normalize_record(
         timestamp=timestamp,
         distance_mm=_first_int("distance", distance_message, profile_message),
         confidence=_first_int("confidence", distance_message, profile_message),
+        valid=_infer_valid(distance_message, profile_message),
         scan_start_mm=_first_int(
             "scan_start",
             distance_message,
@@ -505,6 +508,7 @@ def build_telemetry_packet(record: SonarRecord) -> dict[str, Any]:
         "timestamp": record.timestamp,
         "distance_mm": record.distance_mm,
         "confidence": record.confidence,
+        "valid": record.valid,
         "scan_start_mm": record.scan_start_mm,
         "scan_length_mm": record.scan_length_mm,
         "gain_setting": record.gain_setting,
@@ -527,6 +531,7 @@ def append_csv_record(csv_path: Path, record: SonarRecord) -> None:
                 "timestamp": record.timestamp,
                 "distance_mm": record.distance_mm,
                 "confidence": record.confidence,
+                "valid": record.valid,
                 "scan_start_mm": record.scan_start_mm,
                 "scan_length_mm": record.scan_length_mm,
                 "gain_setting": record.gain_setting,
@@ -542,6 +547,7 @@ def build_profile_payload(record: SonarRecord) -> dict[str, Any]:
         "timestamp": record.timestamp,
         "distance_mm": record.distance_mm,
         "confidence": record.confidence,
+        "valid": record.valid,
         "scan_start_mm": record.scan_start_mm,
         "scan_length_mm": record.scan_length_mm,
         "gain_setting": record.gain_setting,
@@ -659,3 +665,19 @@ def _first_bool(field_name: str, *messages: dict[str, Any] | None, fallback: boo
             continue
         return bool(value)
     return fallback
+
+
+def _infer_valid(*messages: dict[str, Any] | None) -> bool | None:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if "valid" in message and message.get("valid") not in (None, ""):
+            return bool(message.get("valid"))
+
+    distance = _first_int("distance", *messages)
+    confidence = _first_int("confidence", *messages)
+    if distance is None:
+        return False
+    if confidence is None:
+        return True
+    return confidence > 0

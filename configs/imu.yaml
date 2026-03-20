@@ -1,0 +1,7 @@
+imu:
+  csv_save: true
+  csv_path:
+  timeout_seconds: 0.5
+
+logging:
+  level: INFO

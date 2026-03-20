@@ -33,6 +33,15 @@ class BatteryState:
     low_warning: bool = False
 
 
+@dataclass(slots=True)
+class AttitudeState:
+    timestamp_iso: str | None = None
+    unix_time: float | None = None
+    roll: float | None = None
+    pitch: float | None = None
+    yaw: float | None = None
+
+
 class RuntimeState:
     def __init__(self, data_root: Path) -> None:
         self._lock = threading.Lock()
@@ -44,9 +53,11 @@ class RuntimeState:
         self.camera = ComponentState()
         self.sonar = ComponentState()
         self.battery = ComponentState()
+        self.imu = ComponentState()
         self.network = ComponentState()
         self.server = ComponentState()
         self.latest_battery = BatteryState()
+        self.latest_attitude = AttitudeState()
         self._battery_history: deque[dict[str, float | None]] = deque(maxlen=10)
         self.network_connected: bool | None = None
         self.network_ssid: str | None = None
@@ -72,7 +83,7 @@ class RuntimeState:
             self.session_stop_requested = False
             self.session_started_at = None
 
-            for component in (self.camera, self.sonar, self.battery):
+            for component in (self.camera, self.sonar, self.battery, self.imu):
                 component.running = False
                 component.updated_at = _now_iso()
 
@@ -137,6 +148,25 @@ class RuntimeState:
             )
             self.last_updated_at = _now_iso()
 
+    def set_attitude_state(
+        self,
+        *,
+        timestamp_iso: str,
+        unix_time: float,
+        roll: float | None,
+        pitch: float | None,
+        yaw: float | None,
+    ) -> None:
+        with self._lock:
+            self.latest_attitude = AttitudeState(
+                timestamp_iso=timestamp_iso,
+                unix_time=unix_time,
+                roll=roll,
+                pitch=pitch,
+                yaw=yaw,
+            )
+            self.last_updated_at = _now_iso()
+
     def battery_history(self) -> list[dict[str, float | None]]:
         with self._lock:
             return list(self._battery_history)
@@ -162,9 +192,11 @@ class RuntimeState:
                 "camera": asdict(self.camera),
                 "sonar": asdict(self.sonar),
                 "battery": asdict(self.battery),
+                "imu": asdict(self.imu),
                 "network": asdict(self.network),
                 "server": asdict(self.server),
                 "latest_battery": asdict(self.latest_battery),
+                "latest_attitude": asdict(self.latest_attitude),
                 "network_connected": self.network_connected,
                 "network_ssid": self.network_ssid,
                 "power_warning": self.power_warning,
