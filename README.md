@@ -17,6 +17,7 @@ underwater_acquisition_kit/
 |  |- camera_test.py
 |  |- camera_record.py
 |  |- sonar_logger.py
+|  |- sonar_profile_probe.py
 |  |- sonar_quick_test.py
 |  |- live_sensor_check.py
 |  |- run_session.py
@@ -155,6 +156,14 @@ python3 apps/live_sensor_check.py
 ```
 
 This prints live sonar, battery, and ATTITUDE values so you can physically move the setup and confirm the numbers change in a meaningful way before recording a session.
+
+Quick sonar profile probe:
+
+```bash
+python3 apps/sonar_profile_probe.py --attempts 10 --save-first
+```
+
+This checks whether the current Ping/brping path actually returns `profile_data` and prints the first few values when available.
 
 What it does:
 
