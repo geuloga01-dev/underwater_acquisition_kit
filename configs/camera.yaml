@@ -2,6 +2,7 @@ camera:
   # Keep hardware-dependent settings here so Windows and Jetson can use the same code.
   source: "/dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._exploreHD_USB_Camera_SN00009-video-index0"
   backend: v4l2
+  pixel_format: MJPG
   width: 1920
   height: 1080
   fps: 30

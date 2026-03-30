@@ -522,6 +522,12 @@ class SessionController:
         opened = False
         frame_count = 0
         recording_started = False
+        actual_settings: dict[str, Any] = {
+            "width": None,
+            "height": None,
+            "fps": None,
+            "pixel_format": None,
+        }
         try:
             camera_config = load_camera_config(camera_raw)
             recording_config = load_recording_config(camera_raw)
@@ -531,7 +537,14 @@ class SessionController:
             capture.open()
             opened = True
             self.runtime_state.update_component("camera", ready=True, running=True, ok=True, last_error=None)
-            logger.info("Camera open success.")
+            actual_settings = capture.describe_actual_settings()
+            logger.info(
+                "Camera open success. actual_width=%s actual_height=%s actual_fps=%s actual_pixel_format=%s",
+                actual_settings["width"],
+                actual_settings["height"],
+                actual_settings["fps"],
+                actual_settings["pixel_format"],
+            )
 
             recorder = VideoRecorder(
                 output_path=video_path,
@@ -583,6 +596,14 @@ class SessionController:
                 "recording_started": recording_started,
                 "frames_written": frame_count,
                 "elapsed_seconds": elapsed,
+                "requested_width": camera_config.width,
+                "requested_height": camera_config.height,
+                "requested_fps": camera_config.fps,
+                "requested_pixel_format": camera_config.pixel_format,
+                "actual_width": actual_settings["width"],
+                "actual_height": actual_settings["height"],
+                "actual_fps": actual_settings["fps"],
+                "actual_pixel_format": actual_settings["pixel_format"],
             }
         except Exception as exc:
             self.runtime_state.update_component("camera", running=False, ok=False, last_error=str(exc))

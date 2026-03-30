@@ -21,6 +21,7 @@ _BACKEND_MAP = {
 class CameraConfig:
     source: int | str = 0
     backend: str = "default"
+    pixel_format: str | None = None
     width: int | None = 640
     height: int | None = 480
     fps: int | None = 30
@@ -37,6 +38,7 @@ def load_camera_config(raw_config: dict[str, Any]) -> CameraConfig:
     return CameraConfig(
         source=camera_section.get("source", 0),
         backend=str(camera_section.get("backend", "default")).lower(),
+        pixel_format=_optional_str(camera_section.get("pixel_format")),
         width=_optional_int(camera_section.get("width")),
         height=_optional_int(camera_section.get("height")),
         fps=_optional_int(camera_section.get("fps")),
@@ -54,6 +56,12 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _optional_str(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
 def _optional_bool(value: Any, default: bool | None = None) -> bool | None:
     if value in (None, ""):
         return default
@@ -67,6 +75,10 @@ class WebcamCapture:
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
         self.capture: cv2.VideoCapture | None = None
+        self.actual_width: int | None = None
+        self.actual_height: int | None = None
+        self.actual_fps: float | None = None
+        self.actual_pixel_format: str | None = None
 
     def open(self) -> None:
         backend = _BACKEND_MAP.get(self.config.backend, cv2.CAP_ANY)
@@ -88,7 +100,9 @@ class WebcamCapture:
         if self.capture is None:
             return
 
-        # Keep resolution and FPS configurable so the same module can adapt to Jetson later.
+        if self.config.pixel_format:
+            fourcc = cv2.VideoWriter_fourcc(*self.config.pixel_format[:4])
+            self.capture.set(cv2.CAP_PROP_FOURCC, fourcc)
         if self.config.width is not None:
             self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
         if self.config.height is not None:
@@ -101,6 +115,7 @@ class WebcamCapture:
             self.capture.set(cv2.CAP_PROP_FOCUS, self.config.focus)
 
         self._warm_up_camera()
+        self._capture_actual_settings()
 
     def _warm_up_camera(self) -> None:
         if self.capture is None:
@@ -115,7 +130,58 @@ class WebcamCapture:
             raise RuntimeError("Camera has not been opened yet.")
         return self.capture.read()
 
+    def describe_actual_settings(self) -> dict[str, Any]:
+        return {
+            "width": self.actual_width,
+            "height": self.actual_height,
+            "fps": self.actual_fps,
+            "pixel_format": self.actual_pixel_format,
+        }
+
+    def _capture_actual_settings(self) -> None:
+        if self.capture is None:
+            return
+
+        self.actual_width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+        self.actual_height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+        self.actual_fps = float(self.capture.get(cv2.CAP_PROP_FPS) or 0.0) or None
+        self.actual_pixel_format = _decode_fourcc(int(self.capture.get(cv2.CAP_PROP_FOURCC) or 0))
+
+        self.logger.info(
+            "Camera actual settings resolved. requested=%sx%s@%s format=%s actual=%sx%s@%s format=%s",
+            self.config.width,
+            self.config.height,
+            self.config.fps,
+            self.config.pixel_format,
+            self.actual_width,
+            self.actual_height,
+            self.actual_fps,
+            self.actual_pixel_format,
+        )
+        if (
+            self.config.width
+            and self.config.height
+            and self.actual_width
+            and self.actual_height
+            and (self.actual_width != self.config.width or self.actual_height != self.config.height)
+        ):
+            self.logger.warning(
+                "Camera capture resolution fallback detected. requested=%sx%s actual=%sx%s",
+                self.config.width,
+                self.config.height,
+                self.actual_width,
+                self.actual_height,
+            )
+
     def release(self) -> None:
         if self.capture is not None:
             self.capture.release()
             self.capture = None
+
+
+def _decode_fourcc(value: int) -> str | None:
+    if value <= 0:
+        return None
+    chars = [chr((value >> shift) & 0xFF) for shift in (0, 8, 16, 24)]
+    decoded = "".join(chars).strip("\x00 ")
+    return decoded or None
