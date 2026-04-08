@@ -352,6 +352,50 @@ def read_sonar_status(csv_path: Path, logger: logging.Logger, sample_count: int 
     }
 
 
+def _runtime_sonar_payload(runtime_state: RuntimeState) -> dict[str, Any] | None:
+    snapshot = runtime_state.snapshot()
+    latest_sonar = snapshot.get("latest_sonar", {})
+    if latest_sonar.get("unix_time") is None:
+        return None
+
+    history = runtime_state.sonar_history()
+    valid_history = [row for row in history if row.get("distance_mm") is not None]
+    sample_count_used = len(valid_history)
+    variation_mm = None
+    if sample_count_used >= 2:
+        distances = [float(row["distance_mm"]) for row in valid_history if row.get("distance_mm") is not None]
+        if distances:
+            variation_mm = round(max(distances) - min(distances), 2)
+
+    confidence = latest_sonar.get("confidence")
+    confidences = [float(row["confidence"]) for row in valid_history if row.get("confidence") is not None]
+    average_confidence = statistics.mean(confidences) if confidences else None
+    status = "stable"
+    stable = True
+    if average_confidence is None or average_confidence < 70:
+        status = "weak_signal"
+        stable = False
+    elif variation_mm is not None and variation_mm > 80:
+        status = "unstable"
+        stable = False
+
+    distance_mm = latest_sonar.get("distance_mm")
+    return {
+        "distance_mm": distance_mm,
+        "distance_m": None if distance_mm is None else round(float(distance_mm) / 1000.0, 3),
+        "confidence": confidence,
+        "sample_count_used": sample_count_used,
+        "variation_mm": variation_mm,
+        "stable": stable,
+        "status": status,
+        "last_updated": latest_sonar.get("unix_time"),
+        "valid": latest_sonar.get("valid"),
+        "scan_start_mm": latest_sonar.get("scan_start_mm"),
+        "scan_length_mm": latest_sonar.get("scan_length_mm"),
+        "ping_number": latest_sonar.get("ping_number"),
+    }
+
+
 def _parse_tegrastats_metric(output: str, pattern: str) -> float | None:
     match = re.search(pattern, output, re.IGNORECASE)
     if not match:
@@ -975,9 +1019,14 @@ def create_status_app(
     @app.get("/sonar")
     def get_sonar() -> dict[str, Any]:
         logger.info("Request received: GET /sonar")
+        snapshot = runtime_state.snapshot()
+        runtime_payload = _runtime_sonar_payload(runtime_state)
+        if snapshot.get("session_running") and runtime_payload is not None:
+            return runtime_payload
+
         latest_session = find_latest_session_dir(project_root)
         if latest_session is None:
-            return {
+            return runtime_payload or {
                 "distance_mm": None,
                 "distance_m": None,
                 "confidence": None,
@@ -988,7 +1037,10 @@ def create_status_app(
                 "last_updated": None,
             }
 
-        return read_sonar_status(latest_session / "sonar" / "sonar_log.csv", logger)
+        csv_payload = read_sonar_status(latest_session / "sonar" / "sonar_log.csv", logger)
+        if csv_payload.get("status") == "no_data" and runtime_payload is not None:
+            return runtime_payload
+        return csv_payload
 
     @app.get("/system")
     def get_system() -> dict[str, Any]:

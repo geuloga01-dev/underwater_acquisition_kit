@@ -10,10 +10,10 @@ sonar:
   profile_batch_size: 16
   profile_queue_size: 128
   profile_flush_interval_seconds: 1.0
-  scan_start_mm: 250
-  scan_length_mm: 800
-  gain_setting: 1
-  mode_auto: false
+  scan_start_mm:
+  scan_length_mm:
+  gain_setting:
+  mode_auto: true
   transmit_duration_us:
   beam_angle_deg:
   camera_sonar_relative_pose:

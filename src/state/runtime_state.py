@@ -43,6 +43,18 @@ class AttitudeState:
 
 
 @dataclass(slots=True)
+class SonarTelemetryState:
+    timestamp_iso: str | None = None
+    unix_time: float | None = None
+    distance_mm: float | None = None
+    confidence: float | None = None
+    valid: bool | None = None
+    scan_start_mm: float | None = None
+    scan_length_mm: float | None = None
+    ping_number: float | None = None
+
+
+@dataclass(slots=True)
 class GpsState:
     timestamp_iso: str | None = None
     unix_time: float | None = None
@@ -72,9 +84,11 @@ class RuntimeState:
         self.network = ComponentState()
         self.server = ComponentState()
         self.latest_battery = BatteryState()
+        self.latest_sonar = SonarTelemetryState()
         self.latest_attitude = AttitudeState()
         self.latest_gps = GpsState()
         self._battery_history: deque[dict[str, float | None]] = deque(maxlen=10)
+        self._sonar_history: deque[dict[str, float | None]] = deque(maxlen=20)
         self.network_connected: bool | None = None
         self.network_ssid: str | None = None
         self.power_warning: str | None = None
@@ -183,6 +197,39 @@ class RuntimeState:
             )
             self.last_updated_at = _now_iso()
 
+    def set_sonar_state(
+        self,
+        *,
+        timestamp_iso: str,
+        unix_time: float,
+        distance_mm: float | None,
+        confidence: float | None,
+        valid: bool | None,
+        scan_start_mm: float | None,
+        scan_length_mm: float | None,
+        ping_number: float | None,
+    ) -> None:
+        with self._lock:
+            self.latest_sonar = SonarTelemetryState(
+                timestamp_iso=timestamp_iso,
+                unix_time=unix_time,
+                distance_mm=distance_mm,
+                confidence=confidence,
+                valid=valid,
+                scan_start_mm=scan_start_mm,
+                scan_length_mm=scan_length_mm,
+                ping_number=ping_number,
+            )
+            self._sonar_history.append(
+                {
+                    "unix_time": unix_time,
+                    "distance_mm": distance_mm,
+                    "confidence": confidence,
+                    "valid": 1.0 if valid else 0.0 if valid is not None else None,
+                }
+            )
+            self.last_updated_at = _now_iso()
+
     def set_gps_state(
         self,
         *,
@@ -216,6 +263,10 @@ class RuntimeState:
         with self._lock:
             return list(self._battery_history)
 
+    def sonar_history(self) -> list[dict[str, float | None]]:
+        with self._lock:
+            return list(self._sonar_history)
+
     def set_network_status(self, connected: bool | None, ssid: str | None, last_error: str | None = None) -> None:
         with self._lock:
             self.network_connected = connected
@@ -242,6 +293,7 @@ class RuntimeState:
                 "network": asdict(self.network),
                 "server": asdict(self.server),
                 "latest_battery": asdict(self.latest_battery),
+                "latest_sonar": asdict(self.latest_sonar),
                 "latest_attitude": asdict(self.latest_attitude),
                 "latest_gps": asdict(self.latest_gps),
                 "network_connected": self.network_connected,

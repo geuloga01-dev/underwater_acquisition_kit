@@ -1035,6 +1035,16 @@ class SessionController:
             self._preview_sonar_state.record = record
             self._preview_sonar_state.error = None
             self._preview_sonar_state.last_update_monotonic = time.monotonic()
+        self.runtime_state.set_sonar_state(
+            timestamp_iso=record.timestamp_iso,
+            unix_time=record.unix_time,
+            distance_mm=None if record.distance_mm is None else float(record.distance_mm),
+            confidence=None if record.confidence is None else float(record.confidence),
+            valid=record.valid,
+            scan_start_mm=None if record.scan_start_mm is None else float(record.scan_start_mm),
+            scan_length_mm=None if record.scan_length_mm is None else float(record.scan_length_mm),
+            ping_number=None if record.ping_number is None else float(record.ping_number),
+        )
 
     def _set_preview_sonar_error(self, message: str) -> None:
         with self._preview_sonar_lock:
