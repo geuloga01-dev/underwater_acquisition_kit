@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import yaml
 
-from src.telemetry.gps_listener import GpsListener, GpsRecord, load_gps_config
+from src.telemetry.gps_listener import GpsListener, GpsRecord, _is_recoverable_serial_error, load_gps_config
 from src.utils.logger import get_app_logger
 
 
@@ -123,7 +123,16 @@ def main() -> int:
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
-            record = listener.read_record(include_partial=True)
+            try:
+                record = listener.read_record(include_partial=True)
+            except Exception as exc:
+                if not _is_recoverable_serial_error(exc):
+                    raise
+                logger.warning("GPS serial read hiccup, reconnecting: %s", exc)
+                listener.reconnect()
+                last_diagnostic_time = time.monotonic()
+                last_diagnostic_message = None
+                continue
             if record is None:
                 now = time.monotonic()
                 if now - last_diagnostic_time >= 3.0:

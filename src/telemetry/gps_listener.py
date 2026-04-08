@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import csv
 import logging
 import os
@@ -87,6 +87,12 @@ class GpsListener:
             self.config.timeout_seconds,
         )
 
+    def reconnect(self, delay_seconds: float = 0.2) -> None:
+        self.close()
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        self.connect()
+
     def read_record(self, include_partial: bool = False) -> GpsRecord | None:
         if self._serial is None:
             raise RuntimeError("GPS listener has not been connected yet.")
@@ -131,7 +137,7 @@ class GpsListener:
             return None
 
         return GpsRecord(
-            timestamp=time.time(),
+            timestamp=_resolve_record_timestamp(self._latest_fix),
             sentence_type=sentence_type,
             nmea_utc=_as_str(self._latest_fix.get("nmea_utc")),
             latitude_deg=_as_float(self._latest_fix.get("latitude_deg")),
@@ -206,7 +212,16 @@ def run_gps_logging_loop(
 
     try:
         while not stop_event.is_set():
-            record = listener.read_record()
+            try:
+                record = listener.read_record()
+            except Exception as exc:
+                if not _is_recoverable_serial_error(exc):
+                    raise
+                state.update_component("gps", running=True, ok=False, last_error=str(exc))
+                logger.warning("GPS serial read hiccup, reconnecting: %s", exc)
+                listener.reconnect()
+                state.update_component("gps", running=True, ok=True, last_error=None)
+                continue
             if record is None:
                 continue
 
@@ -347,15 +362,17 @@ def _extract_ubx_nav_pvt_record(raw_line: bytes) -> GpsRecord | None:
     hour = payload[8]
     minute = payload[9]
     second = payload[10]
+    nano = struct.unpack_from("<i", payload, 16)[0]
     nmea_utc = None
     if year and month and day:
         nmea_utc = f"{hour:02d}{minute:02d}{second:02d}"
+    timestamp = _utc_timestamp_from_parts(year, month, day, hour, minute, second, nano)
 
     carr_soln = (flags >> 6) & 0x03
     fix_quality = _ubx_fix_quality(fix_type, carr_soln)
 
     return GpsRecord(
-        timestamp=time.time(),
+        timestamp=timestamp,
         sentence_type="UBX-NAV-PVT",
         nmea_utc=nmea_utc,
         latitude_deg=latitude_deg,
@@ -411,6 +428,60 @@ def _ubx_fix_quality(fix_type: int, carr_soln: int) -> int | None:
     if fix_type == 2:
         return 1
     return 0 if fix_type == 0 else None
+
+
+def _resolve_record_timestamp(fields: dict[str, Any]) -> float:
+    nmea_utc = _as_str(fields.get("nmea_utc"))
+    if nmea_utc is None or len(nmea_utc) < 6:
+        return time.time()
+
+    now = datetime.now(timezone.utc)
+    try:
+        hour = int(nmea_utc[0:2])
+        minute = int(nmea_utc[2:4])
+        second_float = float(nmea_utc[4:])
+        second = int(second_float)
+        microsecond = int(round((second_float - second) * 1_000_000))
+        candidate = now.replace(hour=hour, minute=minute, second=second, microsecond=microsecond)
+    except ValueError:
+        return time.time()
+
+    delta_seconds = candidate.timestamp() - now.timestamp()
+    if delta_seconds > 12 * 3600:
+        candidate -= timedelta(days=1)
+    elif delta_seconds < -12 * 3600:
+        candidate += timedelta(days=1)
+    return candidate.timestamp()
+
+
+def _utc_timestamp_from_parts(
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    second: int,
+    nano: int,
+) -> float:
+    try:
+        base = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+    except ValueError:
+        return time.time()
+    return base.timestamp() + nano / 1_000_000_000.0
+
+
+def _is_recoverable_serial_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        fragment in text
+        for fragment in (
+            "returned no data",
+            "device disconnected",
+            "readiness to read",
+            "input/output error",
+            "resource temporarily unavailable",
+        )
+    )
 
 
 def _optional_bool(value: Any, default: bool = False) -> bool:
