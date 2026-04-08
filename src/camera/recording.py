@@ -96,11 +96,14 @@ class FrameTimestampWriter:
     def __init__(self, output_path: Path) -> None:
         self.output_path = output_path
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.output_path.open("w", encoding="utf-8", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(["frame_id", "timestamp"])
+        self._file = self.output_path.open("w", encoding="utf-8", newline="")
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(["frame_id", "timestamp"])
 
     def write(self, frame_id: int, timestamp: float) -> None:
-        with self.output_path.open("a", encoding="utf-8", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow([frame_id, timestamp])
+        self._writer.writerow([frame_id, timestamp])
+
+    def release(self) -> None:
+        if not self._file.closed:
+            self._file.flush()
+            self._file.close()

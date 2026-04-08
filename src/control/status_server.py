@@ -38,7 +38,21 @@ class BackgroundBatteryMonitor:
         self.runtime_state = runtime_state
         self.logger = logger
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._listener: BatteryListener | None = None
+
+    def pause(self) -> None:
+        self._pause_event.set()
+        if self._listener is not None:
+            self._listener.close()
+            self._listener = None
+        self.logger.info("Background battery monitor paused.")
+
+    def resume(self) -> None:
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self.logger.info("Background battery monitor resumed.")
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -54,22 +68,20 @@ class BackgroundBatteryMonitor:
             self._thread.join(timeout=2.0)
 
     def _run_loop(self) -> None:
-        listener: BatteryListener | None = None
-
         while not self._stop_event.is_set():
             try:
-                if self.runtime_state.session_running:
-                    if listener is not None:
-                        listener.close()
-                        listener = None
+                if self._pause_event.is_set() or self.runtime_state.session_running:
+                    if self._listener is not None:
+                        self._listener.close()
+                        self._listener = None
                     self._stop_event.wait(self.config.poll_interval)
                     continue
 
-                if listener is None:
-                    listener = BatteryListener(self.config, logger=self.logger)
-                    listener.connect()
+                if self._listener is None:
+                    self._listener = BatteryListener(self.config, logger=self.logger)
+                    self._listener.connect()
 
-                record = listener.read_record(timeout=self.config.poll_interval)
+                record = self._listener.read_record(timeout=self.config.poll_interval)
                 if record is None:
                     continue
 
@@ -90,13 +102,14 @@ class BackgroundBatteryMonitor:
             except Exception as exc:
                 self.logger.warning("Background battery monitor read failed: %s", exc)
                 self.runtime_state.update_component("battery", running=False, ok=False, last_error=str(exc))
-                if listener is not None:
-                    listener.close()
-                    listener = None
+                if self._listener is not None:
+                    self._listener.close()
+                    self._listener = None
                 self._stop_event.wait(max(self.config.poll_interval, 1.0))
 
-        if listener is not None:
-            listener.close()
+        if self._listener is not None:
+            self._listener.close()
+            self._listener = None
 
 
 def find_latest_session_dir(project_root: Path) -> Path | None:
@@ -819,10 +832,16 @@ def create_status_app(
 
     def start_session_response(session_name: str | None = None, request_method: str = "POST") -> dict[str, Any]:
         logger.info("Session start requested. method=%s session_name=%s", request_method, session_name)
+        if background_battery_monitor is not None:
+            background_battery_monitor.pause()
         result = session_controller.start_session(session_name=session_name)
         if result.get("ok"):
+            if background_battery_monitor is not None:
+                background_battery_monitor.resume()
             logger.info("Session started. session_id=%s", result.get("session_id"))
         else:
+            if background_battery_monitor is not None:
+                background_battery_monitor.resume()
             logger.info("Duplicate start rejected. session_id=%s", result.get("session_id"))
         return {
             "success": bool(result.get("ok")),
@@ -835,6 +854,8 @@ def create_status_app(
         logger.info("Session stop requested. method=%s", request_method)
         result = session_controller.stop_session()
         if not result.get("ok"):
+            if background_battery_monitor is not None:
+                background_battery_monitor.resume()
             logger.info("Stop requested with no active session.")
             return {
                 "success": False,
@@ -848,6 +869,8 @@ def create_status_app(
             logger.info("Session stop still in progress. session_id=%s", result.get("session_id"))
             message = "session stop requested"
         else:
+            if background_battery_monitor is not None:
+                background_battery_monitor.resume()
             logger.info("Session stopped. session_id=%s", result.get("session_id"))
             message = "session stopped"
 

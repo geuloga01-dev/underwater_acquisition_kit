@@ -854,7 +854,7 @@ class SessionController:
                 output_path=video_path,
                 recording_config=recording_config,
                 frame_size=(camera_config.width or 640, camera_config.height or 480),
-                fps=float(camera_config.fps or 30),
+                fps=float(actual_settings["fps"] or camera_config.fps or 30),
                 logger=logger,
             )
             timestamp_writer = FrameTimestampWriter(video_path.parent.parent / "timestamps" / "frame_timestamps.csv")
@@ -915,6 +915,8 @@ class SessionController:
             self.runtime_state.update_component("camera", running=False, ok=False, last_error=str(exc))
             raise
         finally:
+            if timestamp_writer is not None:
+                timestamp_writer.release()
             if recorder is not None:
                 recorder.release()
             if capture is not None:
