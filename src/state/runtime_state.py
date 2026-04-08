@@ -42,6 +42,20 @@ class AttitudeState:
     yaw: float | None = None
 
 
+@dataclass(slots=True)
+class GpsState:
+    timestamp_iso: str | None = None
+    unix_time: float | None = None
+    latitude_deg: float | None = None
+    longitude_deg: float | None = None
+    altitude_m: float | None = None
+    fix_quality: int | None = None
+    num_satellites: int | None = None
+    hdop: float | None = None
+    speed_knots: float | None = None
+    track_deg: float | None = None
+
+
 class RuntimeState:
     def __init__(self, data_root: Path) -> None:
         self._lock = threading.Lock()
@@ -52,12 +66,14 @@ class RuntimeState:
         self.session_started_at: str | None = None
         self.camera = ComponentState()
         self.sonar = ComponentState()
+        self.gps = ComponentState()
         self.battery = ComponentState()
         self.imu = ComponentState()
         self.network = ComponentState()
         self.server = ComponentState()
         self.latest_battery = BatteryState()
         self.latest_attitude = AttitudeState()
+        self.latest_gps = GpsState()
         self._battery_history: deque[dict[str, float | None]] = deque(maxlen=10)
         self.network_connected: bool | None = None
         self.network_ssid: str | None = None
@@ -83,7 +99,7 @@ class RuntimeState:
             self.session_stop_requested = False
             self.session_started_at = None
 
-            for component in (self.camera, self.sonar, self.battery, self.imu):
+            for component in (self.camera, self.sonar, self.gps, self.battery, self.imu):
                 component.running = False
                 component.updated_at = _now_iso()
 
@@ -167,6 +183,35 @@ class RuntimeState:
             )
             self.last_updated_at = _now_iso()
 
+    def set_gps_state(
+        self,
+        *,
+        timestamp_iso: str,
+        unix_time: float,
+        latitude_deg: float | None,
+        longitude_deg: float | None,
+        altitude_m: float | None,
+        fix_quality: int | None,
+        num_satellites: int | None,
+        hdop: float | None,
+        speed_knots: float | None,
+        track_deg: float | None,
+    ) -> None:
+        with self._lock:
+            self.latest_gps = GpsState(
+                timestamp_iso=timestamp_iso,
+                unix_time=unix_time,
+                latitude_deg=latitude_deg,
+                longitude_deg=longitude_deg,
+                altitude_m=altitude_m,
+                fix_quality=fix_quality,
+                num_satellites=num_satellites,
+                hdop=hdop,
+                speed_knots=speed_knots,
+                track_deg=track_deg,
+            )
+            self.last_updated_at = _now_iso()
+
     def battery_history(self) -> list[dict[str, float | None]]:
         with self._lock:
             return list(self._battery_history)
@@ -191,12 +236,14 @@ class RuntimeState:
                 "session_started_at": self.session_started_at,
                 "camera": asdict(self.camera),
                 "sonar": asdict(self.sonar),
+                "gps": asdict(self.gps),
                 "battery": asdict(self.battery),
                 "imu": asdict(self.imu),
                 "network": asdict(self.network),
                 "server": asdict(self.server),
                 "latest_battery": asdict(self.latest_battery),
                 "latest_attitude": asdict(self.latest_attitude),
+                "latest_gps": asdict(self.latest_gps),
                 "network_connected": self.network_connected,
                 "network_ssid": self.network_ssid,
                 "power_warning": self.power_warning,
@@ -210,6 +257,7 @@ class RuntimeState:
             "battery_link": "ok" if snapshot["battery"]["ok"] else "fail",
             "camera": snapshot["camera"],
             "sonar": snapshot["sonar"],
+            "gps": snapshot["gps"],
             "network": {
                 "connected": snapshot["network_connected"],
                 "ssid": snapshot["network_ssid"],

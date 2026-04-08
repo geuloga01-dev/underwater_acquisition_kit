@@ -5,7 +5,7 @@ Jetson-side underwater acquisition and control kit for a sealed vessel. Core acq
 ## Architecture
 
 - Local acquisition is the priority.
-- Camera recording, sonar logging, battery logging, and metadata writing run on Jetson without requiring a remote client.
+- Camera recording, sonar logging, GPS logging, battery logging, and metadata writing run on Jetson without requiring a remote client.
 - FastAPI status/control is optional and sits beside acquisition instead of underneath it.
 - Wi-Fi monitoring and Jetson power-mode switching are helpers. Failures there should warn and continue rather than stop the core data path.
 
@@ -52,6 +52,8 @@ underwater_acquisition_kit/
   Creates the FastAPI app with JSON status/control endpoints.
 - `src/telemetry/battery_listener.py`
   Reads `BATTERY_STATUS` from Pixhawk MAVLink and writes battery CSV data.
+- `src/telemetry/gps_listener.py`
+  Reads NMEA sentences from a GPS serial device and writes GPS CSV data.
 - `src/network/wifi_monitor.py`
   Checks Wi-Fi state with `nmcli` and tries reconnect without blocking acquisition.
 - `src/system/power_manager.py`
@@ -68,6 +70,7 @@ data/sessions/<session_id>/
 |- video/
 |- timestamps/
 |- sonar/
+|- gps/
 |- imu/
 |- battery/
 |- logs/
@@ -80,6 +83,7 @@ Typical outputs:
 - `timestamps/frame_timestamps.csv`
 - `sonar/sonar_log.csv`
 - `sonar/sonar_profile.jsonl`
+- `gps/gps_log.csv`
 - `imu/attitude_log.csv`
 - `battery/battery_log.csv`
 - `meta/session_metadata.json`
@@ -105,6 +109,12 @@ Typical outputs:
 - Pixhawk MAVLink port and baudrate
 - Battery poll interval
 - CSV output and low-battery threshold
+
+### `configs/gps.yaml`
+
+- GPS enable flag
+- Serial port, baudrate, and read timeout
+- CSV output toggle
 
 ### `configs/imu.yaml`
 
@@ -133,13 +143,14 @@ Typical outputs:
 - `PyYAML`
 - `brping`
 - `pymavlink`
+- `pyserial`
 - `fastapi`
 - `uvicorn`
 
 Example:
 
 ```bash
-pip install opencv-python PyYAML brping pymavlink fastapi uvicorn
+pip install opencv-python PyYAML brping pymavlink pyserial fastapi uvicorn
 ```
 
 ## Local Session Run
@@ -181,6 +192,7 @@ What it does:
 - starts sonar logging when available
 - writes expanded sonar metadata to `sonar/sonar_log.csv`
 - writes `sonar/sonar_profile.jsonl` when profile reads are supported
+- starts GPS logging when enabled and available
 - starts shared Pixhawk battery + ATTITUDE logging when available
 - opens camera and records locally
 - writes metadata and logs
@@ -192,10 +204,12 @@ What it does:
 
 - Camera is the critical subsystem for the current MVP. If camera initialization fails, the session fails clearly.
 - Sonar is optional. If sonar is disconnected or initialization fails, the session logs a warning, marks sonar unavailable, and continues with camera-only or camera+battery capture.
+- GPS is optional. If GPS is disabled, disconnected, or fails to initialize, the session logs a warning and continues as long as camera recording is working.
 - Battery and ATTITUDE logging are optional. If the shared Pixhawk MAVLink worker fails, the session logs a warning and continues as long as camera recording is working.
 - Session metadata records which subsystems were active for that run:
   - `camera: true/false`
   - `sonar: true/false`
+  - `gps: true/false`
   - `battery: true/false`
   - `imu: true/false`
 - Session metadata also records camera runtime details such as whether recording actually started and how many frames were written.

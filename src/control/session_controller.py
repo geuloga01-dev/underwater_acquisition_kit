@@ -3,21 +3,41 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 import yaml
 
 from src.camera.recording import FrameTimestampWriter, VideoRecorder, load_recording_config
 from src.camera.webcam import WebcamCapture, load_camera_config
-from src.sonar.ping_logger import PingSonarClient, load_sonar_config, log_sonar_stream, prepare_sonar
+from src.sonar.ping_logger import PingSonarClient, SonarRecord, load_sonar_config, log_sonar_stream, prepare_sonar
+from src.telemetry.gps_listener import GpsListener, load_gps_config, run_gps_logging_loop
 from src.state.runtime_state import RuntimeState
 from src.system.power_manager import JetsonPowerManager
 from src.telemetry.battery_listener import append_battery_csv, load_battery_config, normalize_battery_message
 from src.telemetry.attitude_listener import append_attitude_csv, load_attitude_config, normalize_attitude_message
 from src.utils.logger import get_app_logger
 from src.utils.session import create_session_dirs, save_metadata, session_paths_to_dict
+
+
+_GRID_COLOR = (90, 180, 255)
+_CENTER_COLOR = (0, 0, 255)
+_ECHO_CENTER_COLOR = (0, 255, 255)
+_ECHO_RASTER_COLOR = (80, 255, 80)
+_ECHO_CENTER_REF_WIDTH = 1920.0
+_ECHO_CENTER_REF_HEIGHT = 1080.0
+_ECHO_CENTER_REF_X = 960.0
+_ECHO_CENTER_REF_Y = 430.0
+
+
+@dataclass(slots=True)
+class PreviewSonarState:
+    record: SonarRecord | None = None
+    error: str | None = None
+    last_update_monotonic: float | None = None
 
 
 def load_yaml_config(config_path: Path) -> dict:
@@ -40,6 +60,174 @@ def resolve_preview_setting(camera_raw: dict[str, Any], camera_config, recording
     return bool(camera_config.preview), "camera.preview"
 
 
+def draw_alignment_guides(frame):
+    guided = frame.copy()
+    height, width = guided.shape[:2]
+    center_x = width // 2
+    center_y = height // 2
+
+    third_x = width // 3
+    third_y = height // 3
+    for x in (third_x, 2 * third_x):
+        cv2.line(guided, (x, 0), (x, height), _GRID_COLOR, 1, cv2.LINE_AA)
+    for y in (third_y, 2 * third_y):
+        cv2.line(guided, (0, y), (width, y), _GRID_COLOR, 1, cv2.LINE_AA)
+
+    cross_half = max(16, min(width, height) // 20)
+    cv2.line(guided, (center_x - cross_half, center_y), (center_x + cross_half, center_y), _CENTER_COLOR, 2, cv2.LINE_AA)
+    cv2.line(guided, (center_x, center_y - cross_half), (center_x, center_y + cross_half), _CENTER_COLOR, 2, cv2.LINE_AA)
+    cv2.circle(guided, (center_x, center_y), 5, _CENTER_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(
+        guided,
+        "center",
+        (center_x + 10, center_y - 10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        _CENTER_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+
+    # Echo-center candidate estimated from seekingcenter session, scaled to current preview size.
+    echo_x = int(round((_ECHO_CENTER_REF_X / _ECHO_CENTER_REF_WIDTH) * width))
+    echo_y = int(round((_ECHO_CENTER_REF_Y / _ECHO_CENTER_REF_HEIGHT) * height))
+    raster_step = max(22, min(width, height) // 24)
+
+    for dx in (-raster_step, 0, raster_step):
+        for dy in (-raster_step, 0, raster_step):
+            px = echo_x + dx
+            py = echo_y + dy
+            color = _ECHO_CENTER_COLOR if (dx == 0 and dy == 0) else _ECHO_RASTER_COLOR
+            radius = 7 if (dx == 0 and dy == 0) else 4
+            thickness = 2 if (dx == 0 and dy == 0) else 1
+            cv2.circle(guided, (px, py), radius, color, thickness, cv2.LINE_AA)
+
+    cv2.line(guided, (echo_x - 14, echo_y), (echo_x + 14, echo_y), _ECHO_CENTER_COLOR, 2, cv2.LINE_AA)
+    cv2.line(guided, (echo_x, echo_y - 14), (echo_x, echo_y + 14), _ECHO_CENTER_COLOR, 2, cv2.LINE_AA)
+    cv2.putText(
+        guided,
+        "echo-center candidate",
+        (echo_x + 12, echo_y + 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        _ECHO_CENTER_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+    return guided
+
+
+def _build_profile_peaks(record: SonarRecord) -> list[dict[str, float]]:
+    if not record.profile_data or record.scan_start_mm is None or record.scan_length_mm is None:
+        return []
+    values = [float(value) for value in record.profile_data]
+    peaks: list[dict[str, float]] = []
+    step_mm = float(record.scan_length_mm) / max(len(values), 1)
+    for index in range(1, len(values) - 1):
+        current = values[index]
+        if current >= values[index - 1] and current >= values[index + 1]:
+            peaks.append(
+                {
+                    "index": index,
+                    "value": current,
+                    "distance_mm": float(record.scan_start_mm) + (index + 0.5) * step_mm,
+                }
+            )
+    peaks.sort(key=lambda item: item["value"], reverse=True)
+    return peaks[:3]
+
+
+def draw_profile_graph(canvas: Any, record: SonarRecord, origin_x: int, origin_y: int, width: int, height: int) -> None:
+    cv2.rectangle(canvas, (origin_x, origin_y), (origin_x + width, origin_y + height), (55, 55, 55), 1)
+    if not record.profile_data:
+        cv2.putText(
+            canvas,
+            "profile unavailable",
+            (origin_x + 8, origin_y + height // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
+        )
+        return
+
+    values = [float(value) for value in record.profile_data]
+    max_value = max(max(values), 1.0)
+    step_x = width / max(len(values) - 1, 1)
+    points = []
+    for index, value in enumerate(values):
+        x = int(origin_x + index * step_x)
+        y = int(origin_y + height - (value / max_value) * (height - 4)) - 2
+        points.append((x, y))
+    polyline = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
+    cv2.polylines(canvas, [polyline], False, (0, 220, 255), 1)
+
+    for peak in _build_profile_peaks(record):
+        peak_x = int(origin_x + peak["index"] * step_x)
+        peak_y = int(origin_y + height - (peak["value"] / max_value) * (height - 4)) - 2
+        cv2.circle(canvas, (peak_x, peak_y), 3, (0, 0, 255), -1)
+
+
+def draw_sonar_overlay(frame: Any, state: PreviewSonarState) -> Any:
+    panel_height = 190
+    canvas = cv2.copyMakeBorder(frame, 0, panel_height, 0, 0, cv2.BORDER_CONSTANT, value=(18, 18, 18))
+    text_x = 16
+    text_y = frame.shape[0] + 28
+    line_height = 24
+
+    if state.error is not None:
+        cv2.putText(canvas, f"sonar error: {state.error}", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1, cv2.LINE_AA)
+        return canvas
+
+    if state.record is None:
+        cv2.putText(canvas, "waiting for sonar...", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1, cv2.LINE_AA)
+        return canvas
+
+    record = state.record
+    age_text = "n/a" if state.last_update_monotonic is None else f"{time.monotonic() - state.last_update_monotonic:.2f}s"
+    header_lines = [
+        f"distance: {record.distance_mm} mm   confidence: {record.confidence}   ping: {record.ping_number}",
+        f"scan_start: {record.scan_start_mm} mm   scan_length: {record.scan_length_mm} mm   gain: {record.gain_setting}",
+        f"profile_len: {len(record.profile_data) if record.profile_data else 0}   last_update_age: {age_text}",
+    ]
+    for idx, line in enumerate(header_lines):
+        cv2.putText(
+            canvas,
+            line,
+            (text_x, text_y + idx * line_height),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (240, 240, 240),
+            1,
+            cv2.LINE_AA,
+        )
+
+    peaks = _build_profile_peaks(record)
+    peak_lines = ["profile: no peaks"] if not peaks else [
+        f"peak{idx}: {peak['distance_mm']:.0f} mm idx={int(peak['index'])} val={peak['value']:.0f}"
+        for idx, peak in enumerate(peaks, start=1)
+    ]
+    for idx, line in enumerate(peak_lines, start=len(header_lines)):
+        cv2.putText(
+            canvas,
+            line,
+            (text_x, text_y + idx * line_height),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (120, 255, 120),
+            1,
+            cv2.LINE_AA,
+        )
+
+    graph_x = frame.shape[1] // 2
+    graph_y = frame.shape[0] + 12
+    graph_w = frame.shape[1] // 2 - 24
+    graph_h = panel_height - 24
+    draw_profile_graph(canvas, record, graph_x, graph_y, graph_w, graph_h)
+    return canvas
+
+
 class SessionController:
     def __init__(
         self,
@@ -54,6 +242,8 @@ class SessionController:
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
         self._session_id: str | None = None
+        self._preview_sonar_state = PreviewSonarState()
+        self._preview_sonar_lock = threading.Lock()
 
     def _is_session_really_running_locked(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -128,26 +318,33 @@ class SessionController:
             session_paths.logs,
             log_filename="run_session.log",
         )
+        gps_thread: threading.Thread | None = None
         pixhawk_thread: threading.Thread | None = None
         sonar_thread: threading.Thread | None = None
+        gps_errors: list[BaseException] = []
         pixhawk_errors: list[BaseException] = []
         sonar_errors: list[BaseException] = []
+        gps_ready = threading.Event()
         pixhawk_ready = threading.Event()
         sonar_ready = threading.Event()
 
         try:
+            with self._preview_sonar_lock:
+                self._preview_sonar_state = PreviewSonarState()
             camera_raw = load_yaml_config(self.project_root / "configs" / "camera.yaml")
             sonar_raw = load_yaml_config(self.project_root / "configs" / "sonar.yaml")
+            gps_raw = load_yaml_config(self.project_root / "configs" / "gps.yaml")
             battery_raw = load_yaml_config(self.project_root / "configs" / "battery.yaml")
             imu_raw = load_yaml_config(self.project_root / "configs" / "imu.yaml")
 
-            level = resolve_log_level(camera_raw, sonar_raw, battery_raw, imu_raw)
+            level = resolve_log_level(camera_raw, sonar_raw, gps_raw, battery_raw, imu_raw)
             logger.setLevel(level)
             for handler in logger.handlers:
                 handler.setLevel(level)
 
             camera_config = load_camera_config(camera_raw)
             sonar_config = load_sonar_config(sonar_raw)
+            gps_config = load_gps_config(gps_raw)
             battery_config = load_battery_config(battery_raw)
             attitude_config = load_attitude_config(imu_raw)
             recording_config = load_recording_config(camera_raw)
@@ -163,17 +360,20 @@ class SessionController:
 
             self.runtime_state.update_component("camera", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("sonar", ready=False, running=False, ok=False, last_error=None)
+            self.runtime_state.update_component("gps", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("battery", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("imu", ready=False, running=False, ok=False, last_error=None)
 
             video_path = session_paths.video / f"camera_record.{recording_config.container}"
             sonar_csv_path = session_paths.sonar / "sonar_log.csv"
             sonar_profile_path = session_paths.sonar / "sonar_profile.jsonl"
+            gps_csv_path = session_paths.gps / "gps_log.csv"
             battery_csv_path = session_paths.battery / "battery_log.csv"
             attitude_csv_path = session_paths.imu / "attitude_log.csv"
             session_start_time = time.time()
             active_camera = False
             active_sonar = False
+            active_gps = False
             active_battery = False
             active_imu = False
 
@@ -181,6 +381,7 @@ class SessionController:
             logger.info("Preview resolved from %s: %s", preview_source, preview_enabled)
             logger.info("Acquisition is network-independent. Local recording continues without remote connectivity.")
             logger.info("Sonar port prepared: %s", sonar_config.port)
+            logger.info("GPS prepared: enabled=%s port=%s", gps_config.enabled, gps_config.port)
             logger.info("Battery port prepared: %s", battery_config.port)
             logger.info("ATTITUDE logging prepared via shared Pixhawk MAVLink connection.")
 
@@ -196,6 +397,38 @@ class SessionController:
             if active_sonar:
                 logger.info("Waiting 1.0 second after sonar preparation before camera open.")
                 time.sleep(1.0)
+
+            if gps_config.enabled:
+                gps_thread = threading.Thread(
+                    target=self._run_gps_worker,
+                    args=(gps_raw, gps_csv_path, logger, stop_event, gps_ready, gps_errors),
+                    name="gps-worker",
+                    daemon=True,
+                )
+                gps_thread.start()
+
+                for _ in range(20):
+                    if gps_ready.is_set():
+                        active_gps = True
+                        break
+                    if gps_errors:
+                        logger.warning(
+                            "GPS unavailable for this session. Continuing without gps logging: %s",
+                            gps_errors[0],
+                        )
+                        self.runtime_state.update_component(
+                            "gps",
+                            ready=False,
+                            running=False,
+                            ok=False,
+                            last_error="unavailable",
+                        )
+                        break
+                    if gps_thread is None or not gps_thread.is_alive():
+                        break
+                    time.sleep(0.1)
+            else:
+                logger.info("GPS logging disabled in configs/gps.yaml.")
 
             pixhawk_thread = threading.Thread(
                 target=self._run_pixhawk_worker,
@@ -268,6 +501,8 @@ class SessionController:
             active_sensors = ["camera"]
             if active_sonar:
                 active_sensors.append("sonar")
+            if active_gps:
+                active_sensors.append("gps")
             if active_battery:
                 active_sensors.append("battery")
             if active_imu:
@@ -284,6 +519,7 @@ class SessionController:
                     "camera": camera_raw.get("camera", {}),
                     "recording": camera_raw.get("recording", {}),
                     "sonar": sonar_raw.get("sonar", {}),
+                    "gps": gps_raw.get("gps", {}),
                     "battery": battery_raw.get("battery", {}),
                     "imu": imu_raw.get("imu", {}),
                     "camera_intrinsics": camera_raw.get("calibration", {}).get("intrinsics", {}),
@@ -292,6 +528,7 @@ class SessionController:
                     "active_subsystems": {
                         "camera": active_camera,
                         "sonar": active_sonar,
+                        "gps": active_gps,
                         "battery": active_battery,
                         "imu": active_imu,
                     },
@@ -300,6 +537,7 @@ class SessionController:
                         "frame_timestamps": str(session_paths.timestamps / "frame_timestamps.csv"),
                         "sonar_csv": str(sonar_csv_path),
                         "sonar_profile_jsonl": str(sonar_profile_path),
+                        "gps_csv": str(gps_csv_path),
                         "battery_csv": str(battery_csv_path),
                         "attitude_csv": str(attitude_csv_path),
                         "log": str(session_paths.logs / "run_session.log"),
@@ -311,11 +549,15 @@ class SessionController:
             logger.info("Metadata saved: %s", metadata_path)
 
             stop_event.set()
+            if gps_thread is not None:
+                gps_thread.join(timeout=5.0)
             if sonar_thread is not None:
                 sonar_thread.join(timeout=5.0)
             if pixhawk_thread is not None:
                 pixhawk_thread.join(timeout=5.0)
 
+            if gps_errors:
+                logger.warning("GPS logging ended with error but acquisition continued: %s", gps_errors[0])
             if pixhawk_errors:
                 logger.warning("Pixhawk telemetry logging ended with error but acquisition continued: %s", pixhawk_errors[0])
             if sonar_errors:
@@ -326,6 +568,7 @@ class SessionController:
         finally:
             self.runtime_state.update_component("camera", running=False, ready=self.runtime_state.camera.ready, ok=self.runtime_state.camera.ok)
             self.runtime_state.update_component("sonar", running=False, ready=self.runtime_state.sonar.ready, ok=self.runtime_state.sonar.ok)
+            self.runtime_state.update_component("gps", running=False, ready=self.runtime_state.gps.ready, ok=self.runtime_state.gps.ok)
             self.runtime_state.update_component("battery", running=False, ready=self.runtime_state.battery.ready, ok=self.runtime_state.battery.ok)
             self.runtime_state.update_component("imu", running=False, ready=self.runtime_state.imu.ready, ok=self.runtime_state.imu.ok)
             self.runtime_state.set_session(None, running=False, stop_requested=False)
@@ -369,6 +612,7 @@ class SessionController:
             sonar_config = load_sonar_config(sonar_raw)
             client = PingSonarClient(sonar_config, logger=logger)
             first_record = prepare_sonar(client)
+            self._update_preview_sonar_record(first_record)
             self.runtime_state.update_component("sonar", ready=True, running=True, ok=True, last_error=None)
             logger.info(
                 "Sonar worker ready. first_distance_mm=%s first_confidence=%s profile_logging_enabled=%s profile_path=%s",
@@ -385,6 +629,7 @@ class SessionController:
                 csv_path=csv_path,
                 profile_path=profile_path,
                 stop_event=stop_event,
+                on_record=self._update_preview_sonar_record,
             )
             logger.info(
                 "Sonar worker stopped. samples=%d csv_output=%s profile_output=%s",
@@ -394,11 +639,45 @@ class SessionController:
             )
         except Exception as exc:
             error_list.append(exc)
+            self._set_preview_sonar_error(str(exc))
             self.runtime_state.update_component("sonar", running=False, ok=False, last_error=str(exc))
             logger.exception("Sonar worker failed: %s", exc)
         finally:
             if client is not None:
                 client.close()
+
+    def _run_gps_worker(
+        self,
+        gps_raw: dict[str, Any],
+        csv_path: Path,
+        logger: logging.Logger,
+        stop_event: threading.Event,
+        ready_event: threading.Event,
+        error_list: list[BaseException],
+    ) -> None:
+        listener: GpsListener | None = None
+        try:
+            gps_config = load_gps_config(gps_raw)
+            listener = GpsListener(gps_config, logger=logger)
+            listener.connect()
+            self.runtime_state.update_component("gps", ready=True, running=True, ok=True, last_error=None)
+            ready_event.set()
+            sample_count = run_gps_logging_loop(
+                listener,
+                gps_config,
+                logger,
+                self.runtime_state,
+                csv_path if gps_config.csv_save else None,
+                stop_event,
+            )
+            logger.info("GPS worker stopped. samples=%d csv_output=%s", sample_count, csv_path)
+        except Exception as exc:
+            error_list.append(exc)
+            self.runtime_state.update_component("gps", running=False, ok=False, last_error=str(exc))
+            logger.exception("GPS worker failed: %s", exc)
+        finally:
+            if listener is not None:
+                listener.close()
 
     def _run_pixhawk_worker(
         self,
@@ -575,7 +854,9 @@ class SessionController:
                     logger.info("Camera recording started writing frames.")
 
                 if preview_enabled:
-                    cv2.imshow(camera_config.window_name, frame)
+                    preview_frame = draw_alignment_guides(frame)
+                    preview_frame = draw_sonar_overlay(preview_frame, self._snapshot_preview_sonar_state())
+                    cv2.imshow(camera_config.window_name, preview_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         logger.info("Camera preview stop requested by user.")
                         stop_event.set()
@@ -614,3 +895,21 @@ class SessionController:
             if capture is not None:
                 capture.release()
             cv2.destroyAllWindows()
+
+    def _update_preview_sonar_record(self, record: SonarRecord) -> None:
+        with self._preview_sonar_lock:
+            self._preview_sonar_state.record = record
+            self._preview_sonar_state.error = None
+            self._preview_sonar_state.last_update_monotonic = time.monotonic()
+
+    def _set_preview_sonar_error(self, message: str) -> None:
+        with self._preview_sonar_lock:
+            self._preview_sonar_state.error = message
+
+    def _snapshot_preview_sonar_state(self) -> PreviewSonarState:
+        with self._preview_sonar_lock:
+            return PreviewSonarState(
+                record=self._preview_sonar_state.record,
+                error=self._preview_sonar_state.error,
+                last_update_monotonic=self._preview_sonar_state.last_update_monotonic,
+            )

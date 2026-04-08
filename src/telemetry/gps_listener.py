@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import csv
+import logging
+from pathlib import Path
+import threading
+import time
+from typing import Any
+
+from src.state.runtime_state import RuntimeState
+
+
+@dataclass(slots=True)
+class GpsConfig:
+    enabled: bool = False
+    port: str = "/dev/ttyACM1"
+    baudrate: int = 115200
+    timeout_seconds: float = 1.0
+    csv_save: bool = True
+    csv_path: str | None = None
+
+
+@dataclass(slots=True)
+class GpsRecord:
+    timestamp: float
+    sentence_type: str
+    nmea_utc: str | None
+    latitude_deg: float | None
+    longitude_deg: float | None
+    altitude_m: float | None
+    fix_quality: int | None
+    num_satellites: int | None
+    hdop: float | None
+    speed_knots: float | None
+    track_deg: float | None
+
+    @property
+    def unix_time(self) -> float:
+        return self.timestamp
+
+    @property
+    def timestamp_iso(self) -> str:
+        return datetime.fromtimestamp(self.timestamp, timezone.utc).isoformat()
+
+
+def load_gps_config(raw_config: dict[str, Any]) -> GpsConfig:
+    section = raw_config.get("gps", {})
+    return GpsConfig(
+        enabled=_optional_bool(section.get("enabled"), default=False),
+        port=str(section.get("port", "/dev/ttyACM1")),
+        baudrate=int(section.get("baudrate", 115200)),
+        timeout_seconds=float(section.get("timeout_seconds", 1.0)),
+        csv_save=_optional_bool(section.get("csv_save"), default=True),
+        csv_path=section.get("csv_path"),
+    )
+
+
+class GpsListener:
+    def __init__(self, config: GpsConfig, logger: logging.Logger | None = None) -> None:
+        self.config = config
+        self.logger = logger or logging.getLogger(__name__)
+        self._serial = None
+        self._latest_fix: dict[str, Any] = {}
+
+    def connect(self) -> None:
+        try:
+            import serial
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("pyserial is not installed. Install it on Jetson for GPS logging.") from exc
+
+        self._serial = serial.Serial(
+            self.config.port,
+            baudrate=self.config.baudrate,
+            timeout=self.config.timeout_seconds,
+        )
+        self.logger.info(
+            "GPS serial connection opened. port=%s baudrate=%s timeout=%.2fs",
+            self.config.port,
+            self.config.baudrate,
+            self.config.timeout_seconds,
+        )
+
+    def read_record(self, include_partial: bool = False) -> GpsRecord | None:
+        if self._serial is None:
+            raise RuntimeError("GPS listener has not been connected yet.")
+
+        raw_line = self._serial.readline()
+        if not raw_line:
+            return None
+
+        line = raw_line.decode("ascii", errors="ignore").strip()
+        if not line.startswith("$"):
+            return None
+
+        if not _checksum_matches(line):
+            return None
+
+        body = line[1:].split("*", 1)[0]
+        fields = body.split(",")
+        if not fields:
+            return None
+
+        sentence_type = fields[0]
+        parsed: dict[str, Any] | None = None
+        if sentence_type.endswith("GGA"):
+            parsed = _parse_gga(fields)
+        elif sentence_type.endswith("RMC"):
+            parsed = _parse_rmc(fields)
+        else:
+            return None
+
+        if parsed is None:
+            return None
+
+        for key, value in parsed.items():
+            if value is not None:
+                self._latest_fix[key] = value
+
+        if (
+            not include_partial
+            and (self._latest_fix.get("latitude_deg") is None or self._latest_fix.get("longitude_deg") is None)
+        ):
+            return None
+
+        return GpsRecord(
+            timestamp=time.time(),
+            sentence_type=sentence_type,
+            nmea_utc=_as_str(self._latest_fix.get("nmea_utc")),
+            latitude_deg=_as_float(self._latest_fix.get("latitude_deg")),
+            longitude_deg=_as_float(self._latest_fix.get("longitude_deg")),
+            altitude_m=_as_float(self._latest_fix.get("altitude_m")),
+            fix_quality=_as_int(self._latest_fix.get("fix_quality")),
+            num_satellites=_as_int(self._latest_fix.get("num_satellites")),
+            hdop=_as_float(self._latest_fix.get("hdop")),
+            speed_knots=_as_float(self._latest_fix.get("speed_knots")),
+            track_deg=_as_float(self._latest_fix.get("track_deg")),
+        )
+
+    def close(self) -> None:
+        if self._serial is not None:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+            self._serial = None
+
+
+def append_gps_csv(csv_path: Path, record: GpsRecord) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not csv_path.exists()
+    with csv_path.open("a", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "timestamp",
+                "sentence_type",
+                "nmea_utc",
+                "latitude_deg",
+                "longitude_deg",
+                "altitude_m",
+                "fix_quality",
+                "num_satellites",
+                "hdop",
+                "speed_knots",
+                "track_deg",
+            ],
+        )
+        if write_header:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": record.timestamp,
+                "sentence_type": record.sentence_type,
+                "nmea_utc": record.nmea_utc,
+                "latitude_deg": record.latitude_deg,
+                "longitude_deg": record.longitude_deg,
+                "altitude_m": record.altitude_m,
+                "fix_quality": record.fix_quality,
+                "num_satellites": record.num_satellites,
+                "hdop": record.hdop,
+                "speed_knots": record.speed_knots,
+                "track_deg": record.track_deg,
+            }
+        )
+
+
+def run_gps_logging_loop(
+    listener: GpsListener,
+    config: GpsConfig,
+    logger: logging.Logger,
+    state: RuntimeState,
+    csv_path: Path | None,
+    stop_event: threading.Event,
+) -> int:
+    sample_count = 0
+    state.update_component("gps", ready=True, running=True, ok=True, last_error=None)
+    logger.info("GPS logging loop started.")
+
+    try:
+        while not stop_event.is_set():
+            record = listener.read_record()
+            if record is None:
+                continue
+
+            state.set_gps_state(
+                timestamp_iso=record.timestamp_iso,
+                unix_time=record.unix_time,
+                latitude_deg=record.latitude_deg,
+                longitude_deg=record.longitude_deg,
+                altitude_m=record.altitude_m,
+                fix_quality=record.fix_quality,
+                num_satellites=record.num_satellites,
+                hdop=record.hdop,
+                speed_knots=record.speed_knots,
+                track_deg=record.track_deg,
+            )
+
+            if csv_path is not None and config.csv_save:
+                append_gps_csv(csv_path, record)
+
+            sample_count += 1
+    except Exception as exc:
+        state.update_component("gps", running=False, ok=False, last_error=str(exc))
+        logger.exception("GPS logging loop failed: %s", exc)
+        return sample_count
+
+    state.update_component("gps", running=False, ok=True, last_error=None)
+    return sample_count
+
+
+def _parse_gga(fields: list[str]) -> dict[str, Any] | None:
+    if len(fields) < 10:
+        return None
+    return {
+        "nmea_utc": _optional_text(fields[1]),
+        "latitude_deg": _parse_lat_lon(fields[2], fields[3]),
+        "longitude_deg": _parse_lat_lon(fields[4], fields[5]),
+        "fix_quality": _as_int(fields[6]),
+        "num_satellites": _as_int(fields[7]),
+        "hdop": _as_float(fields[8]),
+        "altitude_m": _as_float(fields[9]),
+    }
+
+
+def _parse_rmc(fields: list[str]) -> dict[str, Any] | None:
+    if len(fields) < 9:
+        return None
+    status = _optional_text(fields[2])
+    latitude = _parse_lat_lon(fields[3], fields[4])
+    longitude = _parse_lat_lon(fields[5], fields[6])
+    return {
+        "nmea_utc": _optional_text(fields[1]),
+        "status": status,
+        "latitude_deg": latitude,
+        "longitude_deg": longitude,
+        "speed_knots": _as_float(fields[7]),
+        "track_deg": _as_float(fields[8]),
+    }
+
+
+def _parse_lat_lon(raw_value: str, hemisphere: str) -> float | None:
+    text = _optional_text(raw_value)
+    hemi = _optional_text(hemisphere)
+    if text is None or hemi is None:
+        return None
+
+    try:
+        numeric = float(text)
+    except ValueError:
+        return None
+
+    degrees = int(numeric // 100)
+    minutes = numeric - degrees * 100
+    decimal = degrees + minutes / 60.0
+    if hemi in {"S", "W"}:
+        decimal *= -1.0
+    return decimal
+
+
+def _checksum_matches(sentence: str) -> bool:
+    if "*" not in sentence:
+        return True
+    body, checksum_text = sentence[1:].split("*", 1)
+    checksum = 0
+    for char in body:
+        checksum ^= ord(char)
+    try:
+        return checksum == int(checksum_text[:2], 16)
+    except ValueError:
+        return False
+
+
+def _optional_bool(value: Any, default: bool = False) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _optional_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value).strip() or None
+
+
+def _as_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_str(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+
+logs/
+data/sonar_log.csv
+data/sonar_profile.jsonl
+data/sessions/
+
+tmp_screencast_frames/
+tmp_screencast_frames_full/
+tmp_screencast_tumbler/
+

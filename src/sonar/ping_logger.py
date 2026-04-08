@@ -566,6 +566,7 @@ def log_sonar_stream(
     profile_path: Path | None = None,
     max_samples: int | None = None,
     stop_event: threading.Event | None = None,
+    on_record: Any | None = None,
 ) -> int:
     sample_count = 0
     profile_logging_enabled = bool(config.profile_save and profile_path is not None and config.profile_read_enabled)
@@ -608,6 +609,12 @@ def log_sonar_stream(
             if profile_writer is not None:
                 profile_writer.enqueue(record)
 
+            if callable(on_record):
+                try:
+                    on_record(record)
+                except Exception as callback_exc:
+                    logger.debug("Sonar on_record callback failed: %s", callback_exc)
+
             if config.telemetry_enabled:
                 packet = build_telemetry_packet(record)
                 logger.debug("Telemetry packet prepared: %s", packet)
@@ -638,6 +645,8 @@ def _as_int(value: Any) -> int | None:
 def _normalize_profile_data(value: Any) -> list[int] | None:
     if value in (None, ""):
         return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return [int(item) for item in bytes(value)]
     if isinstance(value, list):
         return [int(item) for item in value]
     if isinstance(value, tuple):

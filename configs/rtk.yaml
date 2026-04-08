@@ -1,0 +1,17 @@
+rtk:
+  enabled: false
+  serial_port: "/dev/serial/by-id/your-ublox-device"
+  baudrate: 115200
+  serial_timeout_seconds: 0.2
+  gga_interval_seconds: 10.0
+  ntrip_server: "caster.example.com:2101"
+  ntrip_user: "your_username"
+  ntrip_pass: "your_password"
+  ntrip_mountpoint: "YOUR_MOUNTPOINT"
+  ntrip_version: "Ntrip/2.0"
+  reconnect_delay_seconds: 2.0
+  write_rtcm_to_serial: true
+  log_nmea: true
+
+logging:
+  level: INFO
