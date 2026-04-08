@@ -251,6 +251,27 @@ def classify_battery_status(
     }
 
 
+def _runtime_battery_payload(runtime_state: RuntimeState) -> dict[str, Any] | None:
+    latest_battery = runtime_state.snapshot().get("latest_battery", {})
+    if latest_battery.get("unix_time") is None:
+        return None
+
+    battery_payload = {
+        "voltage": latest_battery.get("voltage_v"),
+        "current": latest_battery.get("current_a"),
+        "percent": latest_battery.get("remaining_percent"),
+        "battery_temp_c": latest_battery.get("battery_temp_c"),
+        "last_updated": latest_battery.get("unix_time"),
+    }
+    classification = classify_battery_status(
+        battery_payload.get("voltage"),
+        battery_payload.get("current"),
+        battery_payload.get("battery_temp_c"),
+        runtime_state.battery_history(),
+    )
+    return {**battery_payload, **classification}
+
+
 def read_sonar_status(csv_path: Path, logger: logging.Logger, sample_count: int = 10) -> dict[str, Any]:
     if not csv_path.exists():
         return {
@@ -930,6 +951,11 @@ def create_status_app(
     @app.get("/battery")
     def get_battery() -> dict[str, Any]:
         logger.info("Request received: GET /battery")
+        snapshot = runtime_state.snapshot()
+        runtime_payload = _runtime_battery_payload(runtime_state)
+        if snapshot.get("session_running") and runtime_payload is not None:
+            return runtime_payload
+
         latest_session = find_latest_session_dir(project_root)
         if latest_session is not None:
             battery_row = read_latest_battery_row(latest_session / "battery" / "battery_log.csv", logger)
@@ -942,24 +968,9 @@ def create_status_app(
                 )
                 return {**battery_row, **classification}
 
-        latest_battery = runtime_state.snapshot().get("latest_battery", {})
-        if latest_battery.get("unix_time") is None:
+        if runtime_payload is None:
             return {"status": "no_data", "message": "no battery data available"}
-
-        battery_payload = {
-            "voltage": latest_battery.get("voltage_v"),
-            "current": latest_battery.get("current_a"),
-            "percent": latest_battery.get("remaining_percent"),
-            "battery_temp_c": latest_battery.get("battery_temp_c"),
-            "last_updated": latest_battery.get("unix_time"),
-        }
-        classification = classify_battery_status(
-            battery_payload.get("voltage"),
-            battery_payload.get("current"),
-            battery_payload.get("battery_temp_c"),
-            runtime_state.battery_history(),
-        )
-        return {**battery_payload, **classification}
+        return runtime_payload
 
     @app.get("/sonar")
     def get_sonar() -> dict[str, Any]:

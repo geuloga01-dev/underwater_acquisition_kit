@@ -228,6 +228,44 @@ def draw_sonar_overlay(frame: Any, state: PreviewSonarState) -> Any:
     return canvas
 
 
+def _estimate_effective_fps(timestamps: list[float]) -> float | None:
+    if len(timestamps) < 2:
+        return None
+    elapsed = timestamps[-1] - timestamps[0]
+    if elapsed <= 0:
+        return None
+    return (len(timestamps) - 1) / elapsed
+
+
+def _resolve_writer_fps(
+    *,
+    requested_fps: int | None,
+    reported_fps: float | None,
+    measured_fps: float | None,
+    logger: logging.Logger,
+) -> float:
+    fallback_fps = float(reported_fps or requested_fps or 30.0)
+    if measured_fps is None or measured_fps < 1.0:
+        return fallback_fps
+
+    if reported_fps is None:
+        logger.info(
+            "Camera writer fps resolved from measured capture throughput. measured_fps=%.2f",
+            measured_fps,
+        )
+        return measured_fps
+
+    if abs(measured_fps - reported_fps) / max(reported_fps, 1.0) >= 0.10:
+        logger.warning(
+            "Camera writer fps adjusted to measured throughput. reported_fps=%.2f measured_fps=%.2f",
+            reported_fps,
+            measured_fps,
+        )
+        return measured_fps
+
+    return fallback_fps
+
+
 class SessionController:
     def __init__(
         self,
@@ -832,6 +870,8 @@ class SessionController:
             "fps": None,
             "pixel_format": None,
         }
+        writer_fps: float | None = None
+        bootstrap_measured_fps: float | None = None
         try:
             camera_config = load_camera_config(camera_raw)
             recording_config = load_recording_config(camera_raw)
@@ -850,19 +890,58 @@ class SessionController:
                 actual_settings["pixel_format"],
             )
 
+            start_time = time.monotonic()
+            bootstrap_frame_target = max(8, min(16, int(camera_config.fps or 30)))
+            bootstrap_frames: list[Any] = []
+            bootstrap_timestamps: list[float] = []
+            logger.info(
+                "Camera bootstrap sampling started. target_frames=%d",
+                bootstrap_frame_target,
+            )
+            while len(bootstrap_frames) < bootstrap_frame_target and not stop_event.is_set():
+                ok, frame = capture.read()
+                if not ok:
+                    raise RuntimeError("Failed to read a frame from the camera during bootstrap.")
+                bootstrap_frames.append(frame)
+                bootstrap_timestamps.append(time.time())
+
+            bootstrap_measured_fps = _estimate_effective_fps(bootstrap_timestamps)
+            writer_fps = _resolve_writer_fps(
+                requested_fps=camera_config.fps,
+                reported_fps=actual_settings["fps"],
+                measured_fps=bootstrap_measured_fps,
+                logger=logger,
+            )
+            logger.info(
+                "Camera bootstrap sampling finished. sampled_frames=%d measured_fps=%s writer_fps=%.2f",
+                len(bootstrap_frames),
+                None if bootstrap_measured_fps is None else round(bootstrap_measured_fps, 2),
+                writer_fps,
+            )
+
             recorder = VideoRecorder(
                 output_path=video_path,
                 recording_config=recording_config,
                 frame_size=(camera_config.width or 640, camera_config.height or 480),
-                fps=float(actual_settings["fps"] or camera_config.fps or 30),
+                fps=writer_fps,
                 logger=logger,
             )
             timestamp_writer = FrameTimestampWriter(video_path.parent.parent / "timestamps" / "frame_timestamps.csv")
 
             logger.info("Camera recording loop starting.")
-            start_time = time.monotonic()
             if stop_event.is_set():
                 logger.warning("Stop was requested before camera entered the recording loop.")
+
+            for frame, frame_timestamp in zip(bootstrap_frames, bootstrap_timestamps):
+                recorder.write(frame)
+                timestamp_writer.write(frame_count, frame_timestamp)
+                logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)
+                frame_count += 1
+
+            if frame_count > 0:
+                recording_started = True
+                logger.info("Camera recording started writing frames.")
+
             while not stop_event.is_set():
                 ok, frame = capture.read()
                 if not ok:
@@ -874,9 +953,6 @@ class SessionController:
                     timestamp_writer.write(frame_count, frame_timestamp)
                 logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)
                 frame_count += 1
-                if not recording_started:
-                    recording_started = True
-                    logger.info("Camera recording started writing frames.")
 
                 if preview_enabled:
                     preview_frame = draw_alignment_guides(frame)
@@ -896,7 +972,20 @@ class SessionController:
             elapsed = max(time.monotonic() - start_time, 0.001)
             if frame_count == 0:
                 logger.warning("Camera session ended before any frames were recorded.")
-            logger.info("Camera worker finished. frames=%d elapsed=%.2fs avg_fps=%.2f", frame_count, elapsed, frame_count / elapsed)
+            average_fps = frame_count / elapsed
+            logger.info(
+                "Camera worker finished. frames=%d elapsed=%.2fs avg_fps=%.2f writer_fps=%.2f",
+                frame_count,
+                elapsed,
+                average_fps,
+                writer_fps or 0.0,
+            )
+            if writer_fps is not None and abs(average_fps - writer_fps) / max(writer_fps, 1.0) >= 0.10:
+                logger.warning(
+                    "Camera recording speed mismatch detected. writer_fps=%.2f average_capture_fps=%.2f",
+                    writer_fps,
+                    average_fps,
+                )
             return {
                 "opened": opened,
                 "recording_started": recording_started,
@@ -910,6 +999,8 @@ class SessionController:
                 "actual_height": actual_settings["height"],
                 "actual_fps": actual_settings["fps"],
                 "actual_pixel_format": actual_settings["pixel_format"],
+                "bootstrap_measured_fps": bootstrap_measured_fps,
+                "writer_fps": writer_fps,
             }
         except Exception as exc:
             self.runtime_state.update_component("camera", running=False, ok=False, last_error=str(exc))
