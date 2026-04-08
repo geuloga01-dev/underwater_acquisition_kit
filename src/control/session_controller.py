@@ -933,7 +933,7 @@ class SessionController:
                 logger.warning("Stop was requested before camera entered the recording loop.")
 
             for frame, frame_timestamp in zip(bootstrap_frames, bootstrap_timestamps):
-                recorder.write(frame)
+                recorder.write(frame, timestamp=frame_timestamp)
                 timestamp_writer.write(frame_count, frame_timestamp)
                 logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)
                 frame_count += 1
@@ -948,7 +948,7 @@ class SessionController:
                     raise RuntimeError("Failed to read a frame from the camera.")
 
                 frame_timestamp = time.time()
-                recorder.write(frame)
+                recorder.write(frame, timestamp=frame_timestamp)
                 if timestamp_writer is not None:
                     timestamp_writer.write(frame_count, frame_timestamp)
                 logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)

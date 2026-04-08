@@ -52,6 +52,10 @@ class VideoRecorder:
         self.fps = fps
         self.logger = logger or logging.getLogger(__name__)
         self.writer: cv2.VideoWriter | None = None
+        self._start_timestamp: float | None = None
+        self._frames_written = 0
+        self._duplicate_frames = 0
+        self._last_frame = None
 
     def _open_writer(self, frame) -> None:
         if self.writer is not None:
@@ -80,15 +84,42 @@ class VideoRecorder:
             self.output_path,
         )
 
-    def write(self, frame) -> None:
+    def write(self, frame, timestamp: float | None = None) -> None:
         if self.writer is None:
             self._open_writer(frame)
         if self.writer is None:
             raise RuntimeError("Video writer was not initialized.")
+
+        if timestamp is None or self.fps <= 0:
+            self.writer.write(frame)
+            self._frames_written += 1
+            self._last_frame = frame.copy()
+            return
+
+        if self._start_timestamp is None:
+            self._start_timestamp = timestamp
+
+        target_frame_count = max(
+            self._frames_written + 1,
+            int(round((timestamp - self._start_timestamp) * self.fps)) + 1,
+        )
+
+        while self._last_frame is not None and self._frames_written < target_frame_count - 1:
+            self.writer.write(self._last_frame)
+            self._frames_written += 1
+            self._duplicate_frames += 1
+
         self.writer.write(frame)
+        self._frames_written += 1
+        self._last_frame = frame.copy()
 
     def release(self) -> None:
         if self.writer is not None:
+            self.logger.info(
+                "Video writer released. total_frames=%d duplicate_frames=%d",
+                self._frames_written,
+                self._duplicate_frames,
+            )
             self.writer.release()
             self.writer = None
 
