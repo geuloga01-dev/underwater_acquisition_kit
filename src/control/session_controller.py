@@ -385,6 +385,27 @@ class SessionController:
             logger.info("Battery port prepared: %s", battery_config.port)
             logger.info("ATTITUDE logging prepared via shared Pixhawk MAVLink connection.")
 
+            battery_imu_conflict = gps_config.enabled and battery_config.port == gps_config.port
+            if battery_imu_conflict:
+                logger.warning(
+                    "Battery/IMU logging disabled for this session because it shares the GPS serial port: %s",
+                    gps_config.port,
+                )
+                self.runtime_state.update_component(
+                    "battery",
+                    ready=False,
+                    running=False,
+                    ok=False,
+                    last_error="disabled: port conflicts with gps",
+                )
+                self.runtime_state.update_component(
+                    "imu",
+                    ready=False,
+                    running=False,
+                    ok=False,
+                    last_error="disabled: port conflicts with gps",
+                )
+
             try:
                 self._prepare_sonar(sonar_raw, logger)
                 active_sonar = True
@@ -430,13 +451,16 @@ class SessionController:
             else:
                 logger.info("GPS logging disabled in configs/gps.yaml.")
 
-            pixhawk_thread = threading.Thread(
-                target=self._run_pixhawk_worker,
-                args=(battery_raw, imu_raw, battery_csv_path, attitude_csv_path, logger, stop_event, pixhawk_ready, pixhawk_errors),
-                name="pixhawk-worker",
-                daemon=True,
-            )
-            pixhawk_thread.start()
+            if not battery_imu_conflict:
+                pixhawk_thread = threading.Thread(
+                    target=self._run_pixhawk_worker,
+                    args=(battery_raw, imu_raw, battery_csv_path, attitude_csv_path, logger, stop_event, pixhawk_ready, pixhawk_errors),
+                    name="pixhawk-worker",
+                    daemon=True,
+                )
+                pixhawk_thread.start()
+            else:
+                logger.info("Skipping Pixhawk worker startup due to GPS port conflict.")
 
             if active_sonar:
                 sonar_thread = threading.Thread(
@@ -464,36 +488,37 @@ class SessionController:
                         break
                     time.sleep(0.1)
 
-            for _ in range(20):
-                if pixhawk_ready.is_set():
-                    active_battery = True
-                    active_imu = True
-                    break
-                if pixhawk_errors:
-                    logger.warning(
-                        "Pixhawk telemetry unavailable for this session. Continuing without battery/imu logging: %s",
-                        pixhawk_errors[0],
-                    )
-                    active_battery = False
-                    active_imu = False
-                    self.runtime_state.update_component(
-                        "battery",
-                        ready=False,
-                        running=False,
-                        ok=False,
-                        last_error="unavailable",
-                    )
-                    self.runtime_state.update_component(
-                        "imu",
-                        ready=False,
-                        running=False,
-                        ok=False,
-                        last_error="unavailable",
-                    )
-                    break
-                if pixhawk_thread is None or not pixhawk_thread.is_alive():
-                    break
-                time.sleep(0.1)
+            if not battery_imu_conflict:
+                for _ in range(20):
+                    if pixhawk_ready.is_set():
+                        active_battery = True
+                        active_imu = True
+                        break
+                    if pixhawk_errors:
+                        logger.warning(
+                            "Pixhawk telemetry unavailable for this session. Continuing without battery/imu logging: %s",
+                            pixhawk_errors[0],
+                        )
+                        active_battery = False
+                        active_imu = False
+                        self.runtime_state.update_component(
+                            "battery",
+                            ready=False,
+                            running=False,
+                            ok=False,
+                            last_error="unavailable",
+                        )
+                        self.runtime_state.update_component(
+                            "imu",
+                            ready=False,
+                            running=False,
+                            ok=False,
+                            last_error="unavailable",
+                        )
+                        break
+                    if pixhawk_thread is None or not pixhawk_thread.is_alive():
+                        break
+                    time.sleep(0.1)
 
             camera_result = self._run_camera_loop(camera_raw, video_path, logger, stop_event, preview_enabled)
             active_camera = bool(camera_result["opened"])

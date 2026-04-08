@@ -119,6 +119,7 @@ def main() -> int:
         sample_count = 0
         last_diagnostic_time = time.monotonic()
         last_diagnostic_message: str | None = None
+        last_record_time: float | None = None
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -135,7 +136,9 @@ def main() -> int:
                 continue
             if record is None:
                 now = time.monotonic()
-                if now - last_diagnostic_time >= 3.0:
+                if last_record_time is not None and now - last_record_time < 10.0:
+                    continue
+                if now - last_diagnostic_time >= 10.0:
                     diagnostic = inspect_serial_stream(listener)
                     if diagnostic != last_diagnostic_message:
                         logger.warning("No parsed GPS record yet: %s", diagnostic)
@@ -144,6 +147,7 @@ def main() -> int:
                 continue
 
             sample_count += 1
+            last_record_time = time.monotonic()
             last_diagnostic_time = time.monotonic()
             last_diagnostic_message = None
             logger.info("%s", format_record(record, args.show_raw))
