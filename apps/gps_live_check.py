@@ -65,6 +65,32 @@ def format_record(record: GpsRecord, show_raw: bool) -> str:
     return " ".join(parts)
 
 
+def inspect_serial_stream(listener: GpsListener) -> str:
+    serial_handle = getattr(listener, "_serial", None)
+    if serial_handle is None:
+        return "serial not connected"
+
+    waiting = getattr(serial_handle, "in_waiting", 0)
+    if waiting <= 0:
+        return "no bytes received yet"
+
+    sample = serial_handle.read(min(waiting, 64))
+    if not sample:
+        return "bytes expected but none were read"
+
+    if b"$G" in sample or b"$P" in sample:
+        return "NMEA bytes are present but no full GGA/RMC sentence was parsed yet"
+
+    printable = sum(32 <= byte <= 126 or byte in (9, 10, 13) for byte in sample)
+    if printable < max(4, len(sample) // 3):
+        return "non-NMEA binary bytes detected, likely UBX/RTCM output on this port"
+
+    preview = sample.decode("ascii", errors="replace").strip().replace("\n", "\\n")
+    if len(preview) > 48:
+        preview = preview[:48] + "..."
+    return f"unexpected ASCII bytes seen: {preview or '<empty>'}"
+
+
 def main() -> int:
     args = parse_args()
     config_path = PROJECT_ROOT / "configs" / "gps.yaml"
@@ -91,15 +117,26 @@ def main() -> int:
 
         deadline = time.monotonic() + args.duration if args.duration > 0 else None
         sample_count = 0
+        last_diagnostic_time = time.monotonic()
+        last_diagnostic_message: str | None = None
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
             record = listener.read_record(include_partial=True)
             if record is None:
+                now = time.monotonic()
+                if now - last_diagnostic_time >= 3.0:
+                    diagnostic = inspect_serial_stream(listener)
+                    if diagnostic != last_diagnostic_message:
+                        logger.warning("No parsed GPS record yet: %s", diagnostic)
+                        last_diagnostic_message = diagnostic
+                    last_diagnostic_time = now
                 continue
 
             sample_count += 1
+            last_diagnostic_time = time.monotonic()
+            last_diagnostic_message = None
             logger.info("%s", format_record(record, args.show_raw))
 
         logger.info("Live GPS check finished. samples=%d", sample_count)

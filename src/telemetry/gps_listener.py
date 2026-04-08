@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import csv
 import logging
+import os
 from pathlib import Path
+import struct
 import threading
 import time
 from typing import Any
@@ -47,10 +49,13 @@ class GpsRecord:
 
 def load_gps_config(raw_config: dict[str, Any]) -> GpsConfig:
     section = raw_config.get("gps", {})
+    env_enabled = os.getenv("UAK_GPS_ENABLED")
+    env_port = os.getenv("UAK_GPS_PORT")
+    env_baudrate = os.getenv("UAK_GPS_BAUDRATE")
     return GpsConfig(
-        enabled=_optional_bool(section.get("enabled"), default=False),
-        port=str(section.get("port", "/dev/ttyUSB0")),
-        baudrate=int(section.get("baudrate", 115200)),
+        enabled=_optional_bool(env_enabled if env_enabled not in (None, "") else section.get("enabled"), default=False),
+        port=str(env_port if env_port not in (None, "") else section.get("port", "/dev/ttyUSB0")),
+        baudrate=int(env_baudrate if env_baudrate not in (None, "") else section.get("baudrate", 115200)),
         timeout_seconds=float(section.get("timeout_seconds", 1.0)),
         csv_save=_optional_bool(section.get("csv_save"), default=True),
         csv_path=section.get("csv_path"),
@@ -89,6 +94,10 @@ class GpsListener:
         raw_line = self._serial.readline()
         if not raw_line:
             return None
+
+        ubx_record = _extract_ubx_nav_pvt_record(raw_line)
+        if ubx_record is not None:
+            return ubx_record
 
         line = _extract_nmea_sentence(raw_line)
         if line is None:
@@ -311,6 +320,97 @@ def _extract_nmea_sentence(raw_line: bytes) -> str | None:
     if not _checksum_matches(candidate):
         return None
     return candidate
+
+
+def _extract_ubx_nav_pvt_record(raw_line: bytes) -> GpsRecord | None:
+    packet = _extract_ubx_packet(raw_line, msg_class=0x01, msg_id=0x07)
+    if packet is None:
+        return None
+
+    payload = packet[6:-2]
+    if len(payload) < 92:
+        return None
+
+    fix_type = payload[20]
+    flags = payload[21]
+    num_satellites = payload[23]
+    longitude_deg = struct.unpack_from("<i", payload, 24)[0] / 1e7
+    latitude_deg = struct.unpack_from("<i", payload, 28)[0] / 1e7
+    h_msl_m = struct.unpack_from("<i", payload, 36)[0] / 1000.0
+    ground_speed_knots = struct.unpack_from("<i", payload, 60)[0] / 1000.0 * 1.9438444924406048
+    heading_deg = struct.unpack_from("<i", payload, 64)[0] / 1e5
+    p_dop = struct.unpack_from("<H", payload, 76)[0] / 100.0
+
+    year = struct.unpack_from("<H", payload, 4)[0]
+    month = payload[6]
+    day = payload[7]
+    hour = payload[8]
+    minute = payload[9]
+    second = payload[10]
+    nmea_utc = None
+    if year and month and day:
+        nmea_utc = f"{hour:02d}{minute:02d}{second:02d}"
+
+    carr_soln = (flags >> 6) & 0x03
+    fix_quality = _ubx_fix_quality(fix_type, carr_soln)
+
+    return GpsRecord(
+        timestamp=time.time(),
+        sentence_type="UBX-NAV-PVT",
+        nmea_utc=nmea_utc,
+        latitude_deg=latitude_deg,
+        longitude_deg=longitude_deg,
+        altitude_m=h_msl_m,
+        fix_quality=fix_quality,
+        num_satellites=num_satellites,
+        hdop=p_dop,
+        speed_knots=ground_speed_knots,
+        track_deg=heading_deg,
+    )
+
+
+def _extract_ubx_packet(raw_bytes: bytes, msg_class: int, msg_id: int) -> bytes | None:
+    start = raw_bytes.find(b"\xb5\x62")
+    if start < 0:
+        return None
+
+    data = raw_bytes[start:]
+    if len(data) < 8:
+        return None
+    if data[2] != msg_class or data[3] != msg_id:
+        return None
+
+    payload_length = struct.unpack_from("<H", data, 4)[0]
+    packet_length = 6 + payload_length + 2
+    if len(data) < packet_length:
+        return None
+
+    packet = data[:packet_length]
+    checksum = _ubx_checksum(packet[2:-2])
+    if checksum != packet[-2:]:
+        return None
+    return packet
+
+
+def _ubx_checksum(content: bytes) -> bytes:
+    ck_a = 0
+    ck_b = 0
+    for byte in content:
+        ck_a = (ck_a + byte) & 0xFF
+        ck_b = (ck_b + ck_a) & 0xFF
+    return bytes((ck_a, ck_b))
+
+
+def _ubx_fix_quality(fix_type: int, carr_soln: int) -> int | None:
+    if carr_soln == 2:
+        return 4
+    if carr_soln == 1:
+        return 5
+    if fix_type >= 3:
+        return 1
+    if fix_type == 2:
+        return 1
+    return 0 if fix_type == 0 else None
 
 
 def _optional_bool(value: Any, default: bool = False) -> bool:
