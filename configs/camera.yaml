@@ -33,9 +33,12 @@ logging:
   level: INFO
 
 recording:
+  mode: image_sequence
   duration_seconds: 0
   preview: false
   # Use MJPG for recording to preserve frame quality for later extraction/labeling.
   fourcc: MJPG
   container: avi
+  image_extension: jpg
+  image_quality: 98
   output_path:

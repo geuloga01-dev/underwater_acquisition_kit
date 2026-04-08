@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import yaml
 
-from src.camera.recording import FrameTimestampWriter, VideoRecorder, load_recording_config
+from src.camera.recording import FrameTimestampWriter, ImageSequenceRecorder, VideoRecorder, load_recording_config
 from src.camera.webcam import WebcamCapture, load_camera_config
 from src.sonar.ping_logger import PingSonarClient, SonarRecord, load_sonar_config, log_sonar_stream, prepare_sonar
 from src.telemetry.gps_listener import GpsListener, load_gps_config, run_gps_logging_loop
@@ -402,7 +402,10 @@ class SessionController:
             self.runtime_state.update_component("battery", ready=False, running=False, ok=False, last_error=None)
             self.runtime_state.update_component("imu", ready=False, running=False, ok=False, last_error=None)
 
-            video_path = session_paths.video / f"camera_record.{recording_config.container}"
+            if recording_config.mode == "image_sequence":
+                video_path = session_paths.video / "frames"
+            else:
+                video_path = session_paths.video / f"camera_record.{recording_config.container}"
             sonar_csv_path = session_paths.sonar / "sonar_log.csv"
             sonar_profile_path = session_paths.sonar / "sonar_profile.jsonl"
             gps_csv_path = session_paths.gps / "gps_log.csv"
@@ -417,6 +420,7 @@ class SessionController:
 
             logger.info("Session created: %s", session_paths.root)
             logger.info("Preview resolved from %s: %s", preview_source, preview_enabled)
+            logger.info("Recording mode resolved: %s", recording_config.mode)
             logger.info("Acquisition is network-independent. Local recording continues without remote connectivity.")
             logger.info("Sonar port prepared: %s", sonar_config.port)
             logger.info("GPS prepared: enabled=%s port=%s", gps_config.enabled, gps_config.port)
@@ -596,7 +600,8 @@ class SessionController:
                         "imu": active_imu,
                     },
                     "file_paths": {
-                        "video": str(video_path),
+                        "video": None if recording_config.mode == "image_sequence" else str(video_path),
+                        "image_sequence_dir": str(video_path) if recording_config.mode == "image_sequence" else None,
                         "frame_timestamps": str(session_paths.timestamps / "frame_timestamps.csv"),
                         "sonar_csv": str(sonar_csv_path),
                         "sonar_profile_jsonl": str(sonar_profile_path),
@@ -859,7 +864,7 @@ class SessionController:
         preview_enabled: bool,
     ) -> dict[str, Any]:
         capture: WebcamCapture | None = None
-        recorder: VideoRecorder | None = None
+        recorder: VideoRecorder | ImageSequenceRecorder | None = None
         timestamp_writer: FrameTimestampWriter | None = None
         opened = False
         frame_count = 0
@@ -925,6 +930,10 @@ class SessionController:
                 frame_size=(camera_config.width or 640, camera_config.height or 480),
                 fps=writer_fps,
                 logger=logger,
+            ) if recording_config.mode == "video" else ImageSequenceRecorder(
+                output_dir=video_path,
+                recording_config=recording_config,
+                logger=logger,
             )
             timestamp_writer = FrameTimestampWriter(video_path.parent.parent / "timestamps" / "frame_timestamps.csv")
 
@@ -933,7 +942,10 @@ class SessionController:
                 logger.warning("Stop was requested before camera entered the recording loop.")
 
             for frame, frame_timestamp in zip(bootstrap_frames, bootstrap_timestamps):
-                recorder.write(frame, timestamp=frame_timestamp)
+                if isinstance(recorder, ImageSequenceRecorder):
+                    recorder.write(frame, frame_id=frame_count, timestamp=frame_timestamp)
+                else:
+                    recorder.write(frame, timestamp=frame_timestamp)
                 timestamp_writer.write(frame_count, frame_timestamp)
                 logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)
                 frame_count += 1
@@ -948,7 +960,10 @@ class SessionController:
                     raise RuntimeError("Failed to read a frame from the camera.")
 
                 frame_timestamp = time.time()
-                recorder.write(frame, timestamp=frame_timestamp)
+                if isinstance(recorder, ImageSequenceRecorder):
+                    recorder.write(frame, frame_id=frame_count, timestamp=frame_timestamp)
+                else:
+                    recorder.write(frame, timestamp=frame_timestamp)
                 if timestamp_writer is not None:
                     timestamp_writer.write(frame_count, frame_timestamp)
                 logger.debug("Camera frame captured | frame_id=%d timestamp=%.6f", frame_count, frame_timestamp)
@@ -988,6 +1003,7 @@ class SessionController:
                 )
             return {
                 "opened": opened,
+                "recording_mode": recording_config.mode,
                 "recording_started": recording_started,
                 "frames_written": frame_count,
                 "elapsed_seconds": elapsed,

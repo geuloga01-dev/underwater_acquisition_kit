@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import cv2
 import yaml
 
-from src.camera.recording import RecordingConfig, VideoRecorder, load_recording_config
+from src.camera.recording import ImageSequenceRecorder, RecordingConfig, VideoRecorder, load_recording_config
 from src.camera.webcam import WebcamCapture, load_camera_config
 from src.utils.logger import get_app_logger
 
@@ -32,6 +32,9 @@ def build_output_path(recording_config: RecordingConfig) -> Path:
         return Path(recording_config.output_path)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+    if recording_config.mode == "image_sequence":
+        return PROJECT_ROOT / "data" / f"camera_frames_{timestamp}"
+
     filename = f"camera_record_{timestamp}.{recording_config.container}"
     return PROJECT_ROOT / "data" / filename
 
@@ -40,7 +43,7 @@ def main() -> int:
     config_path = PROJECT_ROOT / "configs" / "camera.yaml"
     logger = get_app_logger("camera_record", PROJECT_ROOT / "logs")
     capture: WebcamCapture | None = None
-    recorder: VideoRecorder | None = None
+    recorder: VideoRecorder | ImageSequenceRecorder | None = None
 
     try:
         raw_config = load_yaml_config(config_path)
@@ -51,7 +54,10 @@ def main() -> int:
         camera_config = load_camera_config(raw_config)
         recording_config = load_recording_config(raw_config)
         output_path = build_output_path(recording_config)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if recording_config.mode == "image_sequence":
+            output_path.mkdir(parents=True, exist_ok=True)
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info("Loaded camera config from %s", config_path)
         logger.info("Recording target: %s", output_path)
@@ -64,6 +70,10 @@ def main() -> int:
             recording_config=recording_config,
             frame_size=(camera_config.width or 640, camera_config.height or 480),
             fps=float(camera_config.fps or 30),
+            logger=logger,
+        ) if recording_config.mode == "video" else ImageSequenceRecorder(
+            output_dir=output_path,
+            recording_config=recording_config,
             logger=logger,
         )
 
@@ -84,7 +94,10 @@ def main() -> int:
             if recorder is None:
                 raise RuntimeError("Recorder was not initialized.")
 
-            recorder.write(frame)
+            if isinstance(recorder, ImageSequenceRecorder):
+                recorder.write(frame, frame_id=frame_count, timestamp=time.time())
+            else:
+                recorder.write(frame, timestamp=time.time())
             frame_count += 1
 
             if recording_config.preview:

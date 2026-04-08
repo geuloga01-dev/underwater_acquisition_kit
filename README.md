@@ -79,7 +79,8 @@ data/sessions/<session_id>/
 
 Typical outputs:
 
-- `video/camera_record.<container>`
+- `video/camera_record.<container>` when `recording.mode=video`
+- `video/frames/frame_000000.<ext>` when `recording.mode=image_sequence`
 - `timestamps/frame_timestamps.csv`
 - `sonar/sonar_log.csv`
 - `sonar/sonar_profile.jsonl`
