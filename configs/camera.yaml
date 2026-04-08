@@ -27,6 +27,6 @@ logging:
 recording:
   duration_seconds: 0
   preview: true
-  fourcc: MJPG
-  container: avi
+  fourcc: mp4v
+  container: mp4
   output_path:
