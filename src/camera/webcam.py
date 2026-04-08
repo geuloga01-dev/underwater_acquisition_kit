@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import platform
 from typing import Any
 
 import cv2
@@ -33,7 +34,13 @@ class CameraConfig:
 
 
 def load_camera_config(raw_config: dict[str, Any]) -> CameraConfig:
-    camera_section = raw_config.get("camera", {})
+    camera_section = dict(raw_config.get("camera", {}))
+    platform_overrides = raw_config.get("platform_overrides", {})
+    platform_name = platform.system().lower()
+    if isinstance(platform_overrides, dict):
+        platform_section = platform_overrides.get(platform_name, {})
+        if isinstance(platform_section, dict):
+            camera_section.update(platform_section)
 
     return CameraConfig(
         source=camera_section.get("source", 0),
