@@ -15,7 +15,7 @@ from src.state.runtime_state import RuntimeState
 @dataclass(slots=True)
 class GpsConfig:
     enabled: bool = False
-    port: str = "/dev/ttyACM1"
+    port: str = "/dev/ttyUSB0"
     baudrate: int = 115200
     timeout_seconds: float = 1.0
     csv_save: bool = True
@@ -49,7 +49,7 @@ def load_gps_config(raw_config: dict[str, Any]) -> GpsConfig:
     section = raw_config.get("gps", {})
     return GpsConfig(
         enabled=_optional_bool(section.get("enabled"), default=False),
-        port=str(section.get("port", "/dev/ttyACM1")),
+        port=str(section.get("port", "/dev/ttyUSB0")),
         baudrate=int(section.get("baudrate", 115200)),
         timeout_seconds=float(section.get("timeout_seconds", 1.0)),
         csv_save=_optional_bool(section.get("csv_save"), default=True),
@@ -90,11 +90,8 @@ class GpsListener:
         if not raw_line:
             return None
 
-        line = raw_line.decode("ascii", errors="ignore").strip()
-        if not line.startswith("$"):
-            return None
-
-        if not _checksum_matches(line):
+        line = _extract_nmea_sentence(raw_line)
+        if line is None:
             return None
 
         body = line[1:].split("*", 1)[0]
@@ -290,6 +287,30 @@ def _checksum_matches(sentence: str) -> bool:
         return checksum == int(checksum_text[:2], 16)
     except ValueError:
         return False
+
+
+def _extract_nmea_sentence(raw_line: bytes) -> str | None:
+    text = raw_line.decode("ascii", errors="ignore")
+    start = text.find("$")
+    if start < 0:
+        return None
+
+    candidate = text[start:]
+    line_endings = [idx for idx in (candidate.find("\r"), candidate.find("\n")) if idx >= 0]
+    if line_endings:
+        candidate = candidate[: min(line_endings)]
+
+    if "*" in candidate:
+        star = candidate.find("*")
+        if star + 3 <= len(candidate):
+            candidate = candidate[: star + 3]
+
+    candidate = candidate.strip()
+    if not candidate.startswith("$"):
+        return None
+    if not _checksum_matches(candidate):
+        return None
+    return candidate
 
 
 def _optional_bool(value: Any, default: bool = False) -> bool:

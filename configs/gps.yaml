@@ -1,6 +1,6 @@
 gps:
   enabled: false
-  port: "/dev/ttyACM0"
+  port: "/dev/ttyUSB0"
   baudrate: 115200
   timeout_seconds: 1.0
   csv_save: true
