@@ -27,6 +27,7 @@ logging:
 recording:
   duration_seconds: 0
   preview: false
-  fourcc: XVID
+  # Use MJPG for recording to preserve frame quality for later extraction/labeling.
+  fourcc: MJPG
   container: avi
   output_path:

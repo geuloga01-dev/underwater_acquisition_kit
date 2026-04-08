@@ -72,11 +72,12 @@ class VideoRecorder:
             raise RuntimeError(f"Could not open video writer for '{self.output_path}'.")
 
         self.logger.info(
-            "Video writer opened. size=%sx%s fourcc=%s fps=%.2f",
+            "Video writer opened. size=%sx%s fourcc=%s fps=%.2f output=%s",
             width,
             height,
             self.recording_config.fourcc,
             self.fps,
+            self.output_path,
         )
 
     def write(self, frame) -> None:
