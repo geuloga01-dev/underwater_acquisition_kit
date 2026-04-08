@@ -66,6 +66,10 @@ def format_record(record: GpsRecord, show_raw: bool) -> str:
 
 
 def inspect_serial_stream(listener: GpsListener) -> str:
+    stalled_count = listener.stalled_read_count()
+    if stalled_count > 0:
+        return f"waiting for GPS bytes, stalled_reads={stalled_count}"
+
     serial_handle = getattr(listener, "_serial", None)
     if serial_handle is None:
         return "serial not connected"
@@ -129,7 +133,7 @@ def main() -> int:
             except Exception as exc:
                 if not _is_recoverable_serial_error(exc):
                     raise
-                logger.warning("GPS serial read hiccup, reconnecting: %s", exc)
+                logger.warning("GPS serial stalled, reconnecting: %s", exc)
                 listener.reconnect()
                 last_diagnostic_time = time.monotonic()
                 last_diagnostic_message = None

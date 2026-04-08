@@ -19,7 +19,7 @@ class GpsConfig:
     enabled: bool = False
     port: str = "/dev/ttyUSB0"
     baudrate: int = 115200
-    timeout_seconds: float = 1.0
+    timeout_seconds: float = 2.0
     csv_save: bool = True
     csv_path: str | None = None
 
@@ -56,7 +56,7 @@ def load_gps_config(raw_config: dict[str, Any]) -> GpsConfig:
         enabled=_optional_bool(env_enabled if env_enabled not in (None, "") else section.get("enabled"), default=False),
         port=str(env_port if env_port not in (None, "") else section.get("port", "/dev/ttyUSB0")),
         baudrate=int(env_baudrate if env_baudrate not in (None, "") else section.get("baudrate", 115200)),
-        timeout_seconds=float(section.get("timeout_seconds", 1.0)),
+        timeout_seconds=float(section.get("timeout_seconds", 2.0)),
         csv_save=_optional_bool(section.get("csv_save"), default=True),
         csv_path=section.get("csv_path"),
     )
@@ -68,6 +68,8 @@ class GpsListener:
         self.logger = logger or logging.getLogger(__name__)
         self._serial = None
         self._latest_fix: dict[str, Any] = {}
+        self._consecutive_empty_reads = 0
+        self._empty_read_reconnect_threshold = 8
 
     def connect(self) -> None:
         try:
@@ -86,8 +88,9 @@ class GpsListener:
             self.config.baudrate,
             self.config.timeout_seconds,
         )
+        self._consecutive_empty_reads = 0
 
-    def reconnect(self, delay_seconds: float = 0.2) -> None:
+    def reconnect(self, delay_seconds: float = 0.4) -> None:
         self.close()
         if delay_seconds > 0:
             time.sleep(delay_seconds)
@@ -97,9 +100,18 @@ class GpsListener:
         if self._serial is None:
             raise RuntimeError("GPS listener has not been connected yet.")
 
-        raw_line = self._serial.readline()
+        try:
+            raw_line = self._serial.readline()
+        except Exception as exc:
+            if _is_recoverable_serial_error(exc):
+                self._note_empty_read(str(exc))
+                return None
+            raise
+
         if not raw_line:
+            self._note_empty_read("empty read timeout")
             return None
+        self._reset_empty_read_state()
 
         ubx_record = _extract_ubx_nav_pvt_record(raw_line)
         if ubx_record is not None:
@@ -157,6 +169,31 @@ class GpsListener:
             except Exception:
                 pass
             self._serial = None
+
+    def stalled_read_count(self) -> int:
+        return self._consecutive_empty_reads
+
+    def _note_empty_read(self, reason: str) -> None:
+        self._consecutive_empty_reads += 1
+
+        if (
+            self.logger.isEnabledFor(logging.DEBUG)
+            and self._consecutive_empty_reads in {1, 3, 5}
+        ):
+            self.logger.debug(
+                "GPS empty/stalled read count=%d reason=%s",
+                self._consecutive_empty_reads,
+                reason,
+            )
+
+        if self._consecutive_empty_reads >= self._empty_read_reconnect_threshold:
+            raise RuntimeError(
+                "GPS serial stalled after "
+                f"{self._consecutive_empty_reads} consecutive empty reads: {reason}"
+            )
+
+    def _reset_empty_read_state(self) -> None:
+        self._consecutive_empty_reads = 0
 
 
 def append_gps_csv(csv_path: Path, record: GpsRecord) -> None:
@@ -218,7 +255,7 @@ def run_gps_logging_loop(
                 if not _is_recoverable_serial_error(exc):
                     raise
                 state.update_component("gps", running=True, ok=False, last_error=str(exc))
-                logger.warning("GPS serial read hiccup, reconnecting: %s", exc)
+                logger.warning("GPS serial stalled, reconnecting: %s", exc)
                 listener.reconnect()
                 state.update_component("gps", running=True, ok=True, last_error=None)
                 continue
@@ -480,6 +517,7 @@ def _is_recoverable_serial_error(exc: Exception) -> bool:
             "readiness to read",
             "input/output error",
             "resource temporarily unavailable",
+            "serial stalled after",
         )
     )
 
